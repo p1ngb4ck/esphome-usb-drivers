@@ -182,6 +182,46 @@ void USBAudioClient::setup() {
   }
 
   usb_host::USBClient::setup();
+  if (!this->is_failed() && !this->attachments_.empty())
+    note_registration(&USBAudioClient::undo_attachments_, this, nullptr, nullptr);
+}
+
+USBAudioClient::~USBAudioClient() {
+  RAMAllocator<USBAudioSink> sink_allocator(RAMAllocator<USBAudioSink>::ALLOC_EXTERNAL);
+  for (USBAudioSink *sink : this->sinks_) {
+    sink->~USBAudioSink();
+    sink_allocator.deallocate(sink, 1);
+  }
+  RAMAllocator<USBAudioCapture> capture_allocator(RAMAllocator<USBAudioCapture>::ALLOC_EXTERNAL);
+  for (USBAudioCapture *capture : this->captures_) {
+    capture->~USBAudioCapture();
+    capture_allocator.deallocate(capture, 1);
+  }
+}
+
+void USBAudioClient::attach_speaker(SpeakerRoute route, bool (*holds)(const speaker::Speaker *),
+                                    void (*forget)(speaker::Speaker *)) {
+  this->speaker_routes_.push_back(std::move(route));
+  this->attachments_.push_back({holds, forget, nullptr});
+}
+
+void USBAudioClient::attach_microphone(MicrophoneRoute route, void (*forget)(microphone::Microphone *)) {
+  this->microphone_routes_.push_back(std::move(route));
+  this->attachments_.push_back({nullptr, nullptr, forget});
+}
+
+void USBAudioClient::undo_attachments_(void *target, void *, void *) {
+  auto *self = static_cast<USBAudioClient *>(target);
+  for (const RouteAttachment &attachment : self->attachments_) {
+    if (attachment.speaker_forget != nullptr) {
+      for (USBAudioSink *sink : self->sinks_)
+        attachment.speaker_forget(sink);
+    }
+    if (attachment.microphone_forget != nullptr) {
+      for (USBAudioCapture *capture : self->captures_)
+        attachment.microphone_forget(capture);
+    }
+  }
 }
 
 void USBAudioClient::loop() {
@@ -235,7 +275,27 @@ bool USBAudioClient::teardown() {
         device->mic_stream_.pending_urbs.load(std::memory_order_acquire) != 0 || device->ctrl_submitting_.load())
       done = false;
   }
-  return done;
+  if (!done || !usb_host::USBClient::teardown())
+    return false;
+  return registration_hook == nullptr || this->stop_after_devices_();
+}
+
+bool USBAudioClient::stop_after_devices_() {
+  for (const RouteAttachment &attachment : this->attachments_) {
+    if (attachment.speaker_holds == nullptr)
+      continue;
+    for (const USBAudioSink *sink : this->sinks_) {
+      if (attachment.speaker_holds(sink))
+        return false;
+    }
+  }
+  for (const USBAudioCapture *capture : this->captures_) {
+    if (capture->delivering())
+      return false;
+  }
+  if (this->microphone_ != nullptr && this->microphone_->delivering())
+    return false;
+  return this->ctrl_task_.deallocate() && this->capture_task_.deallocate();
 }
 
 bool USBAudioClient::device_connected() const {
@@ -1777,8 +1837,10 @@ bool USBAudioDevice::parse_as_interface_(bool want_out, uint8_t channels, uint8_
 
   // What the device offers, once per device (the first of the two searches): what a configuration can ask for
   const bool log_formats = want_out == this->client_->spk_cfg_.configured;
+  const uint32_t blacklisted =
+      this->dev_->desc != nullptr ? this->client_->blacklisted_interfaces_(this->dev_->desc) : 0;
   auto try_commit = [&]() {
-    if (!format_seen || !cur_alt_info.valid)
+    if (!format_seen || !cur_alt_info.valid || (cur_intf < 32 && (blacklisted & (1u << cur_intf)) != 0))
       return;
     if (log_formats) {
       char rates[64] = "";
@@ -2861,7 +2923,7 @@ void USBAudioDevice::on_connected() {
                                                      this->client_->mic_cfg_.sample_rate,
                                                      this->mic_as_intf_, this->mic_alt_, this->mic_fmt_);
     if (!this->mic_format_ok_) {
-      ESP_LOGW(TAG, "Device offers no usable microphone format: no microphone on it");
+      ESP_LOGD(TAG, "Device offers no usable microphone format: no microphone on it");
     }
   }
 
