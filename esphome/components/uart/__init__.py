@@ -79,8 +79,6 @@ LibreTinyUARTComponent = uart_ns.class_(
     "LibreTinyUARTComponent", UARTComponent, cg.Component
 )
 HostUartComponent = uart_ns.class_("HostUartComponent", UARTComponent, cg.Component)
-# Base of UARTs without a wire; see require_virtual_uart().
-VirtualUARTComponent = uart_ns.class_("VirtualUARTComponent", UARTComponent)
 
 
 NATIVE_UART_CLASSES = (
@@ -250,7 +248,6 @@ AFTER_DEFAULTS = {CONF_BYTES: 150, CONF_TIMEOUT: "100ms"}
 CONF_DEBUG_PREFIX = "debug_prefix"
 
 # By default, log in hex format when no specific sequence is provided.
-CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 DEFAULT_DEBUG_OUTPUT = "UARTDebug::log_hex(direction, bytes, ':', debug_prefix);"
 DEFAULT_SEQUENCE = [{CONF_LAMBDA: make_data_base(DEFAULT_DEBUG_OUTPUT)}]
 
@@ -292,7 +289,6 @@ DEBUG_SCHEMA = cv.Schema(
         cv.Optional(CONF_DUMMY_RECEIVER, default=False): cv.boolean,
         cv.GenerateID(CONF_DUMMY_RECEIVER_ID): cv.declare_id(UARTDummyReceiver),
         cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
-        cv.Optional(CONF_DEBUG_ADD_UART_SETTINGS, default=False): cv.boolean,
     }
 )
 
@@ -365,9 +361,6 @@ async def debug_to_code(config, parent):
         await cg.register_component(dummy, {})
     if debug_prefix := config[CONF_DEBUG_PREFIX]:
         cg.add(trigger.set_debug_prefix(debug_prefix))
-    if config[CONF_DEBUG_ADD_UART_SETTINGS]:
-        cg.add(trigger.set_debug_add_settings(True))
-        cg.add_define("UART_DEBUGGER_ADD_SETTINGS")
     cg.add_define("USE_UART_DEBUGGER")
 
 
@@ -670,13 +663,6 @@ def restore_line_settings(var: cg.MockObj, uart_id: ID) -> None:
     if CORE.is_esp32 or CORE.is_esp8266:
         key = fnv1_hash(f"uart_line_settings:{uart_id.id}")
         cg.add(var.restore_line_settings(key))
-
-
-def require_virtual_uart() -> None:
-    """Compile the VirtualUARTComponent base; call from the to_code of a class that derives from it."""
-    cg.add_define("USE_UART_VIRTUAL")
-
-
 async def register_uart_device(var, config):
     """Register a UART device, setting up all the internal values.
 
@@ -740,12 +726,9 @@ _platform_filter = filter_source_files_from_platform(
 )
 
 # uart_debugger.cpp is fully #ifdef'd on USE_UART_DEBUGGER, set only when a
-# debug block is configured; uart_virtual.cpp on USE_UART_VIRTUAL.
+# debug block is configured.
 _define_filter = filter_source_files_from_defines(
-    {
-        "uart_debugger.cpp": "USE_UART_DEBUGGER",
-        "uart_virtual.cpp": "USE_UART_VIRTUAL",
-    }
+    {"uart_debugger.cpp": "USE_UART_DEBUGGER"}
 )
 
 

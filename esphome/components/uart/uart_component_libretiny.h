@@ -37,5 +37,4 @@ class LibreTinyUARTComponent final : public UARTComponent, public Component {
 };
 
 }  // namespace esphome::uart
-
 #endif  // USE_LIBRETINY
