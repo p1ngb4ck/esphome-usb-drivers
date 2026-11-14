@@ -99,3 +99,23 @@ core of the build host stays as installed.
 Thank you, [NonaSuomy](https://github.com/NonaSuomy), for parts of `usb_hid` and many of the ideas behind the USB
 HID work. Everyone this project builds on:
 [ATTRIBUTIONS.md](https://github.com/p1ngb4ck/esphome/blob/dev/ATTRIBUTIONS.md).
+
+## Branch structure
+
+Each `pr/` branch holds one part of this topic on top of upstream and says in its `BRANCH.md` what it is based on. `main` holds all of them.
+
+| Branch | Based on |
+|---|---|
+| `pr/uart-debug-add-uart-settings` | `pr/usb-uart` |
+| `pr/usb-audio` | `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-audio-dac` | `pr/usb-audio` |
+| `pr/usb-audio-media-player` | `pr/usb-audio` |
+| `pr/usb-bluetooth` | `pr/esp32-ble-start-order` of p1ngb4ck/esphome-bluetooth, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-cdrom` | `pr/usb-storage` |
+| `pr/usb-ethernet` | `pr/network-usb-ethernet` of p1ngb4ck/esphome-network, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-hid` | `pr/hid` of p1ngb4ck/esphome-hid, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-storage` | `pr/storage` of p1ngb4ck/esphome-storage-interface, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-uart` | `pr/uart-runtime-line-settings` of p1ngb4ck/esphome-uart-tcp, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-uart-ch934x` | `pr/usb-uart` |
+| `pr/usb-uvc` | `pr/camera-encoder-h264` of p1ngb4ck/esphome-esp-video, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-uvc-video-output` | `pr/camera-encoder-option` of p1ngb4ck/esphome-esp-video, `pr/display-video-output` of p1ngb4ck/esphome-esp-video, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
