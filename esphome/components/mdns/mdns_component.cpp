@@ -1,7 +1,6 @@
 #include "esphome/core/defines.h"
 #ifdef USE_MDNS
 #include "esphome/core/application.h"
-#include "esphome/components/network/util.h"
 #include "esphome/core/log.h"
 #include "esphome/core/version.h"
 #include "mdns_component.h"
@@ -152,7 +151,7 @@ void MDNSComponent::compile_records_(StaticVector<MDNSService, MDNS_SERVICE_COUN
     service.proto = MDNS_STR(SERVICE_TCP);
     service.port = []() -> uint16_t { return api::global_api_server->get_port(); };
 
-    const StringRef friendly_name = network::device_friendly_name();
+    const auto &friendly_name = App.get_friendly_name();
     bool friendly_name_empty = friendly_name.empty();
 
     // Calculate exact capacity for txt_records
@@ -338,7 +337,7 @@ void MDNSComponent::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "mDNS:\n"
                 "  Hostname: %s",
-                network::device_name().c_str());
+                App.get_name().c_str());
 #ifdef USE_MDNS_STORE_SERVICES
   ESP_LOGV(TAG, "  Services:");
   for (const auto &service : this->services_) {

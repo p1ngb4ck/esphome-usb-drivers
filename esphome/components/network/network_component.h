@@ -2,7 +2,6 @@
 #include "esphome/core/defines.h"
 #if defined(USE_NETWORK) && defined(USE_ESP32)
 #include "esphome/core/component.h"
-#include "esphome/core/entity_list.h"
 
 #ifdef USE_NETWORK_DEFAULT_ROUTE
 #include "esphome/core/helpers.h"
@@ -27,7 +26,6 @@ enum class NetworkInterface : uint8_t {
   NETWORK_INTERFACE_ETHERNET,
   NETWORK_INTERFACE_WIFI,
   NETWORK_INTERFACE_USB_ETHERNET,
-  NETWORK_INTERFACE_USB_WIFI,
 };
 
 #ifdef NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT
@@ -62,7 +60,6 @@ class NetworkComponent final : public Component {
 #ifdef NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT
   void add_active_interface_listener(ActiveInterfaceListener *listener) {
     this->active_interface_listeners_.push_back(listener);
-    note_registration(&NetworkComponent::remove_active_interface_listener_, this, listener, nullptr);
   }
 #endif
 
@@ -74,11 +71,7 @@ class NetworkComponent final : public Component {
   esp_netif_t *default_netif_{nullptr};
   uint32_t last_route_check_{0};
 #ifdef NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT
-  static void remove_active_interface_listener_(void *network, void *listener, void *unused) {
-    static_cast<NetworkComponent *>(network)->active_interface_listeners_.remove(
-        static_cast<ActiveInterfaceListener *>(listener));
-  }
-  EntityList<ActiveInterfaceListener *, NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT> active_interface_listeners_;
+  StaticVector<ActiveInterfaceListener *, NETWORK_ACTIVE_INTERFACE_LISTENER_COUNT> active_interface_listeners_;
 #endif
   NetworkInterface active_interface_{NetworkInterface::NETWORK_INTERFACE_NONE};
   StaticVector<NetworkInterface, NETWORK_INTERFACE_COUNT> order_;

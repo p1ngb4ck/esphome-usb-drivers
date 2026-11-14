@@ -1,6 +1,6 @@
 # usb_ethernet: guide for AI agents
 
-USB Ethernet adapters (CDC-ECM, CDC-NCM, RNDIS, vendor modes RTL8152/8153/8156, AX88772, AX88178, AX88179, DM9601, SR9700) as an esp_netif interface. Read `esphome/components/usb_host/AGENTS.md`
+USB Ethernet adapters (CDC-ECM, CDC-NCM) as an esp_netif interface. Read `esphome/components/usb_host/AGENTS.md`
 and the network topic's `network` changes (interface priority, default route) first.
 
 - `usb_ethernet.*`: control interface (link state notifications, MAC address from the descriptor), data interface

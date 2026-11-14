@@ -29,9 +29,6 @@ extern "C" {
 #include <freertos/FreeRTOSConfig.h>
 #include <freertos/task.h>
 
-#ifdef USE_BT_PERSISTENCE
-#include "esphome/components/bt_host/persistence.h"
-#endif
 #include <cstring>
 
 #ifdef USE_ARDUINO
@@ -150,7 +147,7 @@ static constexpr uint32_t HOSTED_BT_WDT_TIMEOUT_MS = 60000;
 void ESP32BLE::setup() {
   global_ble = this;
   // Preferences opens NVS in app_main(); a zero handle means it could not be opened, even after an erase
-  if (!global_preferences->nvs_ready) {
+  if (global_preferences->nvs_handle == 0) {
     ESP_LOGE(TAG, "NVS unavailable");
     this->mark_failed();
     return;
@@ -665,11 +662,6 @@ void ESP32BLE::loop_handle_state_transition_not_active_() {
                                                                                           : BLE_COMPONENT_STATE_DISABLED;
     this->restart_requested_ = false;
   } else if (this->state_ == BLE_COMPONENT_STATE_ENABLE) {
-#ifdef USE_BT_PERSISTENCE
-    // Bluedroid reads its pairing data once, when it starts.
-    if (bt_host::global_bt_persistence != nullptr && !bt_host::global_bt_persistence->is_ready())
-      return;
-#endif
     ESP_LOGD(TAG, "Enabling");
     this->state_ = BLE_COMPONENT_STATE_OFF;
 

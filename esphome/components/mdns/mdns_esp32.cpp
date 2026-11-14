@@ -4,7 +4,6 @@
 #include <mdns.h>
 #include <cstring>
 #include "esphome/core/application.h"
-#include "esphome/components/network/util.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "mdns_component.h"
@@ -42,7 +41,7 @@ static void register_esp32(MDNSComponent *comp, StaticVector<MDNSService, MDNS_S
     return;
   }
 
-  const char *hostname = network::device_name().c_str();
+  const char *hostname = App.get_name().c_str();
   mdns_hostname_set(hostname);
   mdns_instance_name_set(hostname);
 
