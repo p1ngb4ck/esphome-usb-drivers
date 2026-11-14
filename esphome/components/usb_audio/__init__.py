@@ -13,14 +13,11 @@ from esphome.components.usb_host import (
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BITS_PER_SAMPLE,
-    CONF_CHANNELS,
-    CONF_GAIN_FACTOR,
     CONF_ID,
     CONF_MICROPHONE,
     CONF_NUM_CHANNELS,
     CONF_OUTPUT_SPEAKER,
     CONF_PLATFORM,
-    CONF_POSITION,
     CONF_SAMPLE_RATE,
     CONF_SPEAKER,
 )
@@ -53,8 +50,6 @@ CONF_VOLUME_CURVE = "volume_curve"
 CONF_CHANNEL_PAIR = "channel_pair"
 CONF_VID = "vid"
 CONF_PID = "pid"
-CONF_ATTACH = "attach"
-CONF_RESAMPLER = "resampler"
 CONF_DEFAULT_BUFFER_SIZE = 6400
 MAX_SINKS = 4
 PREFERRED_FORMATS = {CONF_SPEAKER: (48000, 2), CONF_MICROPHONE: (16000, 1)}
@@ -282,40 +277,6 @@ def _apply_buffer_sizes(config, full_config):
             )
 
 
-def _attach_entries(config, domain):
-    return (config.get(CONF_ATTACH) or {}).get(domain) or []
-
-
-def _validate_attach(config, full_config):
-    hub_id = str(config[CONF_ID])
-    for domain in (CONF_SPEAKER, CONF_MICROPHONE):
-        seen = set()
-        for attach in _attach_entries(config, domain):
-            target = str(attach[CONF_RESAMPLER])
-            if target in seen:
-                raise cv.Invalid(f"usb_audio '{hub_id}': '{target}' attached twice as {domain}")
-            seen.add(target)
-            entry = next(
-                (
-                    item
-                    for item in full_config.get(domain) or []
-                    if str(item.get(CONF_ID)) == target and item.get(CONF_PLATFORM) == "resampler"
-                ),
-                None,
-            )
-            if entry is None:
-                raise cv.Invalid(f"usb_audio '{hub_id}': '{target}' is not a resampler {domain}")
-            if domain == CONF_SPEAKER:
-                if not isinstance(entry.get(CONF_OUTPUT_SPEAKER), list):
-                    raise cv.Invalid(f"usb_audio '{hub_id}': '{target}' has no output list")
-                continue
-            source = entry[CONF_MICROPHONE][0]
-            if attach[CONF_BITS_PER_SAMPLE] != source[CONF_BITS_PER_SAMPLE] or (
-                CONF_NUM_CHANNELS not in entry and len(attach[CONF_CHANNELS]) != len(source[CONF_CHANNELS])
-            ):
-                raise cv.Invalid(f"usb_audio '{hub_id}': the format attached to '{target}' differs from its sources")
-
-
 def _route_count(full_config, domain, key, hub_id) -> int:
     count = 0
     for entry in full_config.get(domain) or []:
@@ -326,7 +287,6 @@ def _route_count(full_config, domain, key, hub_id) -> int:
 
 
 def _validate_routes(config, full_config):
-    _validate_attach(config, full_config)
     hub_id = str(config[CONF_ID])
     for domain in (CONF_SPEAKER, CONF_MICROPHONE):
         platforms = [
@@ -343,18 +303,14 @@ def _validate_routes(config, full_config):
                     f"usb_audio '{hub_id}': the {domain} platform's format differs from the block's '{domain}' format",
                     path=[domain],
                 )
-    speakers = _route_count(full_config, CONF_SPEAKER, CONF_OUTPUT_SPEAKER, hub_id) + len(
-        _attach_entries(config, CONF_SPEAKER)
-    )
+    speakers = _route_count(full_config, CONF_SPEAKER, CONF_OUTPUT_SPEAKER, hub_id)
     fixed = any(
         entry.get(CONF_PLATFORM) == "usb_audio" and str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
         for entry in full_config.get(CONF_SPEAKER) or []
     )
     if speakers + (1 if fixed else 0) > MAX_SINKS:
         raise cv.Invalid(f"usb_audio '{hub_id}': at most {MAX_SINKS} speakers per device (routes and platform)")
-    microphones = _route_count(full_config, CONF_MICROPHONE, CONF_MICROPHONE, hub_id) + len(
-        _attach_entries(config, CONF_MICROPHONE)
-    )
+    microphones = _route_count(full_config, CONF_MICROPHONE, CONF_MICROPHONE, hub_id)
     fixed_mic = any(
         entry.get(CONF_PLATFORM) == "usb_audio" and str(entry.get(CONF_USB_AUDIO_ID)) == hub_id
         for entry in full_config.get(CONF_MICROPHONE) or []
@@ -462,30 +418,6 @@ def _apply_fifo_bias() -> None:
     )
 
 
-ATTACH_SPEAKER_SCHEMA = cv.Schema(
-    {
-        cv.Required(CONF_RESAMPLER): cv.use_id(cg.Component),
-        cv.Optional(CONF_POSITION): cv.int_range(min=0, max=100),
-    }
-)
-
-ATTACH_MICROPHONE_SCHEMA = ATTACH_SPEAKER_SCHEMA.extend(
-    {
-        cv.Optional(CONF_BITS_PER_SAMPLE, default=16): cv.int_range(16, 32),
-        cv.Optional(CONF_CHANNELS, default="0"): cv.All(
-            cv.ensure_list(cv.int_range(0, 7)), cv.Length(min=1, max=2)
-        ),
-        cv.Optional(CONF_GAIN_FACTOR, default="1"): cv.int_range(1, 64),
-    }
-)
-
-ATTACH_SCHEMA = cv.Schema(
-    {
-        cv.Optional(CONF_SPEAKER): cv.All(cv.ensure_list(ATTACH_SPEAKER_SCHEMA), cv.Length(min=1)),
-        cv.Optional(CONF_MICROPHONE): cv.All(cv.ensure_list(ATTACH_MICROPHONE_SCHEMA), cv.Length(min=1)),
-    }
-)
-
 CONFIG_SCHEMA = cv.All(
     cv.COMPONENT_SCHEMA.extend(
         {
@@ -509,7 +441,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_DEVICE_QUIRKS): cv.ensure_list(DEVICE_QUIRK_SCHEMA),
             cv.Optional(CONF_SPEAKER): _format_schema(48000, 2),
             cv.Optional(CONF_MICROPHONE): _format_schema(16000, 1),
-            cv.Optional(CONF_ATTACH): ATTACH_SCHEMA,
         }
     ),
     esp32.only_on_variant(supported=SUPPORTED_VARIANTS),
@@ -540,41 +471,6 @@ async def to_code(config):
     for domain, setter in ((CONF_SPEAKER, var.set_speaker_params), (CONF_MICROPHONE, var.set_microphone_params)):
         if fmt := config.get(domain):
             cg.add(setter(int(fmt[CONF_NUM_CHANNELS]), int(fmt[CONF_BITS_PER_SAMPLE]), int(fmt[CONF_SAMPLE_RATE])))
-
-    for attach in _attach_entries(config, CONF_SPEAKER):
-        target = await cg.get_variable(attach[CONF_RESAMPLER])
-        position = attach.get(CONF_POSITION, -1)
-        cg.add(
-            var.attach_speaker(
-                cg.RawExpression(
-                    "[](esphome::speaker::Speaker *uac_sink, const char *uac_name, uint32_t uac_key, uint32_t uac_rate, "
-                    "uint8_t uac_bits, uint8_t uac_channels, bool uac_added) { "
-                    f"if (uac_added) {{ {target}->add_runtime_output(uac_sink, uac_name, uac_key, uac_rate, uac_bits, "
-                    f"uac_channels, {position}); }} else {{ {target}->remove_output(uac_sink); }} }}"
-                ),
-                cg.RawExpression(
-                    f"[](const esphome::speaker::Speaker *uac_sink) -> bool {{ return {target}->holds_output(uac_sink); }}"
-                ),
-                cg.RawExpression(f"[](esphome::speaker::Speaker *uac_sink) {{ {target}->forget_output(uac_sink); }}"),
-            )
-        )
-
-    for attach in _attach_entries(config, CONF_MICROPHONE):
-        target = await cg.get_variable(attach[CONF_RESAMPLER])
-        position = attach.get(CONF_POSITION, -1)
-        mask = sum(1 << channel for channel in attach[CONF_CHANNELS])
-        bits = attach[CONF_BITS_PER_SAMPLE]
-        gain = attach[CONF_GAIN_FACTOR]
-        cg.add(
-            var.attach_microphone(
-                cg.RawExpression(
-                    "[](esphome::microphone::Microphone *uac_mic, const char *uac_name, uint32_t uac_key, bool uac_added) { "
-                    f"if (uac_added) {{ {target}->add_runtime_source(uac_mic, uac_name, uac_key, {bits}, {gain}, {mask}, "
-                    f"{position}); }} else {{ {target}->remove_source(uac_mic); }} }}"
-                ),
-                cg.RawExpression(f"[](esphome::microphone::Microphone *uac_mic) {{ {target}->forget_source(uac_mic); }}"),
-            )
-        )
 
     cg.add_define("USE_USB_ISOC_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
