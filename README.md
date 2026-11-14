@@ -118,4 +118,4 @@ Each `pr/` branch holds one part of this topic on top of upstream and says in it
 | `pr/usb-uart` | `pr/uart-runtime-line-settings` of p1ngb4ck/esphome-uart-tcp, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
 | `pr/usb-uart-ch934x` | `pr/usb-uart` |
 | `pr/usb-uvc` | `pr/camera-encoder-h264` of p1ngb4ck/esphome-esp-video, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
-| `pr/usb-uvc-video-output` | `pr/camera-encoder-option` of p1ngb4ck/esphome-esp-video, `pr/display-video-output` of p1ngb4ck/esphome-esp-video, `pr/usb-host-refactor` of p1ngb4ck/esphome-usb-host |
+| `pr/usb-uvc-video-output` | `pr/usb-uvc`, `pr/camera-encoder-option` of p1ngb4ck/esphome-esp-video, `pr/display-video-output` of p1ngb4ck/esphome-esp-video |
