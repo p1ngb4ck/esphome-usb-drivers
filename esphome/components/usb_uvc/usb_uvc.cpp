@@ -62,8 +62,7 @@ void UVCClient::loop() {
                  cam->n_bad.exchange(0), cam->n_busy.exchange(0));
         cam->stats_since = now;
       }
-      for (auto &cb : this->frame_callbacks_)
-        cb(static_cast<uint8_t>(cam->dev->addr), data, cam->ready_len, info);
+      this->frame_callbacks_.call(static_cast<uint8_t>(cam->dev->addr), data, cam->ready_len, info);
       if (!cam->held)
         cam->ready.store(false, std::memory_order_release);
     }
@@ -507,8 +506,7 @@ void UVCClient::on_device_connected(usb_host::UsbDevice &dev) {
     return;
   }
   this->select_default_(*cam);
-  for (auto &cb : this->camera_callbacks_)
-    cb(static_cast<uint8_t>(dev.addr), true);
+  this->camera_callbacks_.call(static_cast<uint8_t>(dev.addr), true);
 }
 
 // Main loop: the selected frame size negotiated, then the stream opened
@@ -695,8 +693,7 @@ void UVCClient::on_device_disconnected(usb_host::UsbDevice &dev) {
   if (cam->held)
     this->gone_.push_back(cam);  // its frame is still read: freed once released
   ESP_LOGI(TAG, "Camera disconnected");
-  for (auto &cb : this->camera_callbacks_)
-    cb(static_cast<uint8_t>(dev.addr), false);
+  this->camera_callbacks_.call(static_cast<uint8_t>(dev.addr), false);
 }
 
 bool UVCClient::device_busy_(const usb_host::UsbDevice &dev) const {

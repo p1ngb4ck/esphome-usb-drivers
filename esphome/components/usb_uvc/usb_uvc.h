@@ -93,8 +93,8 @@ class UVCClient : public usb_host::USBClient {
     this->free_ = free;
   }
 
-  void add_frame_callback(frame_cb_t cb) { this->frame_callbacks_.push_back(std::move(cb)); }
-  void add_camera_callback(camera_cb_t cb) { this->camera_callbacks_.push_back(std::move(cb)); }
+  template<typename F> void add_frame_callback(F &&cb) { this->frame_callbacks_.add(std::forward<F>(cb)); }
+  template<typename F> void add_camera_callback(F &&cb) { this->camera_callbacks_.add(std::forward<F>(cb)); }
 
   // Main loop. Cameras by their bus address.
   uint8_t camera_count() const { return static_cast<uint8_t>(this->cameras_.size()); }
@@ -230,8 +230,8 @@ class UVCClient : public usb_host::USBClient {
   BufferAlloc alloc_{nullptr};
   BufferFree free_{nullptr};
 
-  std::vector<frame_cb_t> frame_callbacks_{};
-  std::vector<camera_cb_t> camera_callbacks_{};
+  CallbackManager<void(uint8_t, const uint8_t *, size_t, const UvcFrameInfo &)> frame_callbacks_{};
+  CallbackManager<void(uint8_t, bool)> camera_callbacks_{};
 };
 
 #ifdef USE_CAMERA
