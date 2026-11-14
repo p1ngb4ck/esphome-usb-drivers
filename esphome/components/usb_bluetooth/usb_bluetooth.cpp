@@ -10,7 +10,7 @@
 #include "esp_bluedroid_hci.h"
 #include "esp_bt_main.h"
 #ifdef USE_BT_PERSISTENCE
-#include "esphome/components/bt_persistence/bt_persistence.h"
+#include "esphome/components/bt_host/persistence.h"
 #endif
 #endif
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
@@ -53,7 +53,9 @@ static constexpr uint8_t H4_ACL = 0x02;
 static constexpr uint8_t H4_SCO = 0x03;
 static constexpr uint8_t H4_EVENT = 0x04;
 // Transfer slots a send leaves free (the two readers hold theirs all the time).
-static constexpr size_t SPARE_SLOTS = 1;
+static constexpr size_t SPARE_SLOTS = 2;
+static std::atomic<bool> g_event_read_lost{false};
+static std::atomic<bool> g_acl_read_lost{false};
 #endif
 
 #ifdef USE_USB_BLUETOOTH_BLUEDROID
@@ -188,7 +190,16 @@ void USBBluetooth::on_connected() {
            this->vendor_class_ ? " (vendor class)" : "");
   this->event_len_ = 0;
   this->acl_len_ = 0;
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+  this->held_event_.store(false, std::memory_order_release);
+  this->held_acl_.store(false, std::memory_order_release);
+  this->acl_rest_len_ = 0;
+  if (this->acl_rest_ == nullptr)
+    this->acl_rest_ = static_cast<uint8_t *>(heap_caps_malloc(ACL_REST, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#endif
   this->link_up_.store(true, std::memory_order_release);
+  g_event_read_lost.store(false, std::memory_order_release);
+  g_acl_read_lost.store(false, std::memory_order_release);
   this->read_event_(generation);
   this->read_acl_(generation);
   this->probe_start_();
@@ -198,6 +209,11 @@ void USBBluetooth::on_disconnected() {
   this->generation_.fetch_add(1, std::memory_order_acq_rel);
   this->link_up_.store(false, std::memory_order_release);
   this->stack_attached_.store(false, std::memory_order_release);
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+  c6_offload::stop();
+  this->held_event_.store(false, std::memory_order_release);
+  this->held_acl_.store(false, std::memory_order_release);
+#endif
   this->cancel_timeout("hci");
   this->pending_opcode_ = 0;
   this->pending_ = nullptr;
@@ -232,12 +248,18 @@ bool USBBluetooth::send_command(const uint8_t *packet, size_t len) {
 
 // USB task.
 void USBBluetooth::send_done_() {
-#ifdef USE_USB_BLUETOOTH_H4
+  const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  if (g_event_read_lost.exchange(false, std::memory_order_acq_rel))
+    this->read_event_(generation);
+  if (g_acl_read_lost.exchange(false, std::memory_order_acq_rel))
+    this->read_acl_(generation);
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+  this->send_blocked_.store(false, std::memory_order_release);
+  c6_offload::flush_down();
+#elif defined(USE_USB_BLUETOOTH_H4)
   if (this->send_blocked_.exchange(false, std::memory_order_acq_rel)) {
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
     hci_split::br_send_available();
-#elif defined(USE_USB_BLUETOOTH_C6_OFFLOAD)
-    c6_offload::send_available(true);
 #else
     if (g_host_cb != nullptr && g_host_cb->notify_host_send_available != nullptr)
       g_host_cb->notify_host_send_available();
@@ -258,27 +280,33 @@ bool USBBluetooth::hci_send_available() {
 
 // Bluedroid's HCI task.
 void USBBluetooth::hci_send(uint8_t *data, uint16_t len) {
-  if (!this->link_up_.load(std::memory_order_acquire) || data == nullptr || len < 2)
+  if (data == nullptr || len < 2 || this->hci_write(data, len))
     return;
+  if (data[0] == H4_COMMAND) {
+    ESP_LOGW(TAG, "HCI command 0x%02X%02X dropped", len > 2 ? data[2] : 0, data[1]);
+  } else if (data[0] == H4_ACL) {
+    ESP_LOGW(TAG, "ACL packet of %u bytes dropped", len - 1);
+  }
+}
+
+bool USBBluetooth::hci_write(const uint8_t *data, uint16_t len) {
+  if (!this->link_up_.load(std::memory_order_acquire) || data == nullptr || len < 2)
+    return false;
   switch (data[0]) {
     case H4_COMMAND:
-      if (!this->send_command(data + 1, len - 1))
-        ESP_LOGW(TAG, "HCI command 0x%02X%02X dropped", data[2], data[1]);
-      break;
+      return this->send_command(data + 1, len - 1);
     case H4_ACL:
-      if (!this->send_acl_(data + 1, len - 1))
-        ESP_LOGW(TAG, "ACL packet of %u bytes dropped", len - 1);
-      break;
+      return this->send_acl_(data + 1, len - 1);
     case H4_SCO: {
       static bool said = false;
       if (!said) {
         said = true;
         ESP_LOGV(TAG, "SCO (voice) is not carried over this transport");
       }
-      break;
+      return true;
     }
     default:
-      break;
+      return true;
   }
 }
 
@@ -309,16 +337,82 @@ bool USBBluetooth::send_acl_(const uint8_t *data, size_t len) {
 }
 
 // USB task.
-void USBBluetooth::to_stack_(uint8_t *h4, size_t len) {
+bool USBBluetooth::to_stack_(uint8_t *h4, size_t len) {
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
   hci_split::br_recv(h4, len);
 #elif defined(USE_USB_BLUETOOTH_C6_OFFLOAD)
-  c6_offload::up(h4, len);
+  return c6_offload::up(h4, len);
 #else
   if (g_host_cb != nullptr && g_host_cb->notify_host_recv != nullptr)
     g_host_cb->notify_host_recv(h4, static_cast<uint16_t>(len));
 #endif
+  return true;
 }
+
+bool USBBluetooth::feed_acl_(const uint8_t *in, size_t count) {
+  uint8_t *acl = this->acl_ + 1;
+  while (count > 0) {
+    const size_t want = this->acl_len_ < 4 ? 4 - this->acl_len_ : 4u + (acl[2] | (acl[3] << 8)) - this->acl_len_;
+    const size_t take = std::min(want, count);
+    memcpy(acl + this->acl_len_, in, take);
+    this->acl_len_ += take;
+    in += take;
+    count -= take;
+    if (this->acl_len_ < 4)
+      continue;
+    const size_t total = 4u + (acl[2] | (acl[3] << 8));
+    if (total > ACL_MAX) {
+      this->acl_len_ = 0;
+      break;
+    }
+    if (this->acl_len_ < total)
+      continue;
+    if (this->stack_attached_.load(std::memory_order_acquire)) {
+      this->acl_[0] = H4_ACL;
+      if (!this->to_stack_(this->acl_, total + 1)) {
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+        if (this->acl_rest_ != nullptr && count <= ACL_REST) {
+          memmove(this->acl_rest_, in, count);
+          this->acl_rest_len_ = count;
+          this->held_acl_len_ = total + 1;
+          this->held_acl_.store(true, std::memory_order_release);
+          c6_offload::want_resume();
+          return false;
+        }
+#endif
+        ESP_LOGW(TAG, "ACL packet of %u bytes from the dongle dropped", static_cast<unsigned>(total));
+      }
+    }
+    this->acl_len_ = 0;
+  }
+  return true;
+}
+
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+void USBBluetooth::resume_held() {
+  const uint32_t generation = this->generation_.load(std::memory_order_acquire);
+  if (this->held_event_.load(std::memory_order_acquire)) {
+    if (!c6_offload::up(this->event_, this->held_event_len_)) {
+      c6_offload::want_resume();
+    } else {
+      this->held_event_.store(false, std::memory_order_release);
+      this->read_event_(generation);
+    }
+  }
+  if (this->held_acl_.load(std::memory_order_acquire)) {
+    if (!c6_offload::up(this->acl_, this->held_acl_len_)) {
+      c6_offload::want_resume();
+      return;
+    }
+    this->held_acl_.store(false, std::memory_order_release);
+    this->acl_len_ = 0;
+    const size_t rest = this->acl_rest_len_;
+    this->acl_rest_len_ = 0;
+    if (this->feed_acl_(this->acl_rest_, rest))
+      this->read_acl_(generation);
+  }
+}
+#endif
 
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
 // With usb_bluetooth in the config, esp32_ble waits for the dongle (codegen): Bluedroid starts once, on both
@@ -353,10 +447,10 @@ void USBBluetooth::start_split_() {
 void USBBluetooth::start_bluedroid_() {
 #ifdef USE_BT_PERSISTENCE
   // Bluedroid reads its pairing data once, when it starts.
-  if (bt_persistence::global_bt_persistence != nullptr && !bt_persistence::global_bt_persistence->is_ready()) {
+  if (bt_host::global_bt_persistence != nullptr && !bt_host::global_bt_persistence->is_ready()) {
     if (!this->waiting_for_store_.exchange(true)) {
       this->defer([this]() {
-        bt_persistence::global_bt_persistence->when_ready([this]() {
+        bt_host::global_bt_persistence->when_ready([this]() {
           this->waiting_for_store_ = false;
           this->start_bluedroid_();
         });
@@ -410,7 +504,14 @@ void USBBluetooth::read_event_(uint32_t generation) {
 #ifdef USE_USB_BLUETOOTH_H4
           if (this->stack_attached_.load(std::memory_order_acquire)) {
             this->event_[0] = H4_EVENT;
-            this->to_stack_(this->event_, len + 1);
+            if (!this->to_stack_(this->event_, len + 1)) {
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+              this->held_event_len_ = len + 1;
+              this->held_event_.store(true, std::memory_order_release);
+              c6_offload::want_resume();
+              return;
+#endif
+            }
             this->read_event_(generation);
             return;
           }
@@ -423,8 +524,10 @@ void USBBluetooth::read_event_(uint32_t generation) {
         this->read_event_(generation);
       },
       this->evt_mps_);
-  if (!submitted)
-    ESP_LOGE(TAG, "Event read not submitted");
+  if (!submitted) {
+    ESP_LOGW(TAG, "Event read waits for a free transfer");
+    g_event_read_lost.store(true, std::memory_order_release);
+  }
 }
 
 // USB task.
@@ -440,39 +543,17 @@ void USBBluetooth::read_acl_(uint32_t generation) {
         }
         // A byte stream, as btusb_recv_bulk() takes it: one USB packet may end an ACL packet and
         // begin the next.
-        uint8_t *acl = this->acl_ + 1;
-        const uint8_t *in = status.data;
-        size_t count = status.data_len;
-        while (count > 0) {
-          const size_t want = this->acl_len_ < 4 ? 4 - this->acl_len_ : 4u + (acl[2] | (acl[3] << 8)) - this->acl_len_;
-          const size_t take = std::min(want, count);
-          memcpy(acl + this->acl_len_, in, take);
-          this->acl_len_ += take;
-          in += take;
-          count -= take;
-          if (this->acl_len_ < 4)
-            continue;
-          const size_t total = 4u + (acl[2] | (acl[3] << 8));
-          if (total > ACL_MAX) {
-            // Larger than any controller sends: the stream is lost until the next USB packet.
-            this->acl_len_ = 0;
-            break;
-          }
-          if (this->acl_len_ < total)
-            continue;
 #ifdef USE_USB_BLUETOOTH_H4
-          if (this->stack_attached_.load(std::memory_order_acquire)) {
-            this->acl_[0] = H4_ACL;
-            this->to_stack_(this->acl_, total + 1);
-          }
+        if (!this->feed_acl_(status.data, status.data_len))
+          return;
 #endif
-          this->acl_len_ = 0;
-        }
         this->read_acl_(generation);
       },
       this->acl_in_mps_);
-  if (!submitted)
-    ESP_LOGE(TAG, "ACL read not submitted");
+  if (!submitted) {
+    ESP_LOGW(TAG, "ACL read waits for a free transfer");
+    g_acl_read_lost.store(true, std::memory_order_release);
+  }
 }
 
 // -- Probe (main loop) -------------------------------------------------------------------

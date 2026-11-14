@@ -282,7 +282,7 @@ void WiFiComponent::wifi_lazy_init_() {
   }
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  if (global_preferences->nvs_handle == 0) {
+  if (!global_preferences->nvs_ready) {
     ESP_LOGW(TAG, "starting wifi without nvs");
     cfg.nvs_enable = false;
   }
@@ -1074,7 +1074,7 @@ void WiFiComponent::wifi_process_event_(IDFWiFiEvent *data) {
   if (data->event_base == WIFI_EVENT && data->event_id == WIFI_EVENT_STA_START) {
     ESP_LOGV(TAG, "STA start");
     // apply hostname
-    err = esp_netif_set_hostname(s_sta_netif, App.get_name().c_str());
+    err = esp_netif_set_hostname(s_sta_netif, network::device_name().c_str());
     if (err != ERR_OK) {
       ESP_LOGW(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(err));
     }
@@ -1468,7 +1468,11 @@ bool WiFiComponent::wifi_scan_start_(bool passive) {
   // When scanning while connected (roaming), return to home channel between
   // each scanned channel to maintain the connection (helps with BLE/WiFi coexistence)
 #ifdef CONFIG_SOC_WIFI_SUPPORTED
-  if (this->is_roaming_scan_active()) {
+  if (this->is_roaming_scan_active()
+#ifdef USE_WIFI_SAVED_NETWORKS
+      || this->browse_scan_
+#endif
+  ) {
     config.coex_background_scan = true;
   }
 #endif

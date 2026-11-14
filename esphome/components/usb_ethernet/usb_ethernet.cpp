@@ -29,6 +29,15 @@ static constexpr uint8_t CDC_CLASS_COMM = 0x02;
 static constexpr uint8_t CDC_CLASS_DATA = 0x0A;
 static constexpr uint8_t CDC_SUBCLASS_ECM = 0x06;
 static constexpr uint8_t CDC_SUBCLASS_NCM = 0x0D;
+static constexpr uint8_t RNDIS_CLASS_WIRELESS = 0xE0;
+static constexpr uint8_t RNDIS_SUBCLASS_WIRELESS = 0x01;
+static constexpr uint8_t RNDIS_PROTOCOL_WIRELESS = 0x03;
+static constexpr uint8_t RNDIS_CLASS_MISC = 0xEF;
+static constexpr uint8_t RNDIS_SUBCLASS_MISC = 0x04;
+static constexpr uint8_t RNDIS_PROTOCOL_MISC = 0x01;
+static constexpr uint8_t RNDIS_SUBCLASS_ACM = 0x02;
+static constexpr uint8_t RNDIS_PROTOCOL_ACM = 0xFF;
+static constexpr uint8_t VENDOR_CLASS = 0xFF;
 static constexpr uint8_t CS_INTERFACE = 0x24;
 static constexpr uint8_t CDC_FUNC_UNION = 0x06;
 static constexpr uint8_t CDC_FUNC_ETHERNET = 0x0F;
@@ -84,6 +93,23 @@ USBEthernet::USBEthernet(uint16_t vid, uint16_t pid) : usb_host::USBClient(vid, 
   this->add_class_match(CDC_CLASS_COMM, CDC_SUBCLASS_ECM);
   this->add_class_match(CDC_CLASS_COMM, CDC_SUBCLASS_NCM);
   this->add_class_match(CDC_CLASS_DATA);
+  this->add_class_match(RNDIS_CLASS_WIRELESS, RNDIS_SUBCLASS_WIRELESS, RNDIS_PROTOCOL_WIRELESS);
+  this->add_class_match(RNDIS_CLASS_MISC, RNDIS_SUBCLASS_MISC, RNDIS_PROTOCOL_MISC);
+  this->add_class_match(CDC_CLASS_COMM, RNDIS_SUBCLASS_ACM, RNDIS_PROTOCOL_ACM);
+  for (size_t i = 0; i < RTL8152_ID_COUNT; i++)
+    this->add_vendor_match(RTL8152_IDS[i].vid, RTL8152_IDS[i].pid, RTL8152_CLASS);
+  for (size_t i = 0; i < ASIX_ID_COUNT; i++)
+    this->add_vendor_match(ASIX_IDS[i].vid, ASIX_IDS[i].pid);
+  for (size_t i = 0; i < ASIX_EEPROM_MAC_ID_COUNT; i++)
+    this->add_vendor_match(ASIX_EEPROM_MAC_IDS[i].vid, ASIX_EEPROM_MAC_IDS[i].pid);
+  for (size_t i = 0; i < ASIX_178_ID_COUNT; i++)
+    this->add_vendor_match(ASIX_178_IDS[i].vid, ASIX_178_IDS[i].pid);
+  for (size_t i = 0; i < AX88179_ID_COUNT; i++)
+    this->add_vendor_match(AX88179_IDS[i].vid, AX88179_IDS[i].pid, VENDOR_CLASS, VENDOR_CLASS, 0);
+  for (size_t i = 0; i < DM9601_ID_COUNT; i++)
+    this->add_vendor_match(DM9601_IDS[i].vid, DM9601_IDS[i].pid);
+  for (size_t i = 0; i < SR9700_ID_COUNT; i++)
+    this->add_vendor_match(SR9700_IDS[i].vid, SR9700_IDS[i].pid);
   global_usb_ethernet = this;
 }
 
@@ -115,11 +141,29 @@ void USBEthernet::setup() {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "IP event handler: %s", esp_err_to_name(err));
     this->mark_failed();
+    return;
   }
+  static const network::AddOnInterface ADDON = {
+      []() { return global_usb_ethernet->is_connected(); },
+      []() { return global_usb_ethernet->link_is_up(); },
+      []() -> esp_netif_t * { return global_usb_ethernet->get_esp_netif(); },
+      []() { return global_usb_ethernet->get_ip_addresses(); },
+  };
+  network::addon_usb_ethernet = &ADDON;
+  note_registration(
+      [](void *target, void *, void *) {
+        auto *self = static_cast<USBEthernet *>(target);
+        network::addon_usb_ethernet = nullptr;
+        esp_event_handler_unregister(IP_EVENT, ESP_EVENT_ANY_ID, USBEthernet::ip_event_handler_);
+        esp_netif_destroy(self->netif_);
+        self->netif_ = nullptr;
+        global_usb_ethernet = nullptr;
+      },
+      this, nullptr, nullptr);
 }
 
 void USBEthernet::dump_config() {
-  ESP_LOGCONFIG(TAG, "USB Ethernet (CDC-ECM, CDC-NCM):");
+  ESP_LOGCONFIG(TAG, "USB Ethernet (CDC-ECM, CDC-NCM, RNDIS, RTL8152/8153/8156, AX88772, AX88178, AX88179, DM9601, SR9700):");
   usb_host::USBClient::dump_config();
 #ifdef USE_USB_ETHERNET_MANUAL_IP
   if (this->manual_ip_.has_value()) {
@@ -148,6 +192,8 @@ network::IPAddresses USBEthernet::get_ip_addresses() {
 }
 
 usb_host::MatchTier USBEthernet::refine_match_(const usb_host::RoutedDevice &dev, usb_host::MatchTier tier) const {
+  if (tier == usb_host::MatchTier::VENDOR)
+    return tier;
   if (dev.config == nullptr)
     return usb_host::MatchTier::NONE;
   int offset = 0;
@@ -158,8 +204,41 @@ usb_host::MatchTier USBEthernet::refine_match_(const usb_host::RoutedDevice &dev
     if (intf->bInterfaceClass == CDC_CLASS_COMM &&
         (intf->bInterfaceSubClass == CDC_SUBCLASS_ECM || intf->bInterfaceSubClass == CDC_SUBCLASS_NCM))
       return tier;
+    if ((intf->bInterfaceClass == RNDIS_CLASS_WIRELESS && intf->bInterfaceSubClass == RNDIS_SUBCLASS_WIRELESS &&
+         intf->bInterfaceProtocol == RNDIS_PROTOCOL_WIRELESS) ||
+        (intf->bInterfaceClass == RNDIS_CLASS_MISC && intf->bInterfaceSubClass == RNDIS_SUBCLASS_MISC &&
+         intf->bInterfaceProtocol == RNDIS_PROTOCOL_MISC) ||
+        (intf->bInterfaceClass == CDC_CLASS_COMM && intf->bInterfaceSubClass == RNDIS_SUBCLASS_ACM &&
+         intf->bInterfaceProtocol == RNDIS_PROTOCOL_ACM))
+      return tier;
   }
   return usb_host::MatchTier::NONE;
+}
+
+uint32_t USBEthernet::skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
+                                         const usb_intf_desc_t *alt) const {
+  if (this->vendor_family_(desc) == Proto::NONE)
+    return 0;
+  uint32_t all = 0;
+  bool notify = false, in = false, out = false;
+  int offset = reinterpret_cast<const uint8_t *>(alt) - reinterpret_cast<const uint8_t *>(config);
+  const auto *next = reinterpret_cast<const usb_standard_desc_t *>(alt);
+  while ((next = usb_parse_next_descriptor(next, config->wTotalLength, &offset)) != nullptr &&
+         next->bDescriptorType != USB_W_VALUE_DT_INTERFACE) {
+    if (next->bDescriptorType != USB_W_VALUE_DT_ENDPOINT)
+      continue;
+    const auto *ep = reinterpret_cast<const usb_ep_desc_t *>(next);
+    all |= usb_host::endpoint_bit(ep);
+    const bool dir_in = USB_EP_DESC_GET_EP_DIR(ep);
+    if (USB_EP_DESC_GET_XFERTYPE(ep) == USB_BM_ATTRIBUTES_XFER_INT && dir_in) {
+      notify = true;
+    } else if (USB_EP_DESC_GET_XFERTYPE(ep) == USB_BM_ATTRIBUTES_XFER_BULK && dir_in) {
+      in = true;
+    } else if (USB_EP_DESC_GET_XFERTYPE(ep) == USB_BM_ATTRIBUTES_XFER_BULK) {
+      out = true;
+    }
+  }
+  return notify && in && out ? 0 : all;
 }
 
 bool USBEthernet::parse_descriptors_() {
@@ -259,9 +338,33 @@ bool USBEthernet::parse_descriptors_() {
 
 void USBEthernet::on_connected() {
   const uint32_t generation = this->generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
-  if (!this->parse_descriptors_()) {
-    ESP_LOGW(TAG, "No CDC-ECM / CDC-NCM function with a data interface on this device");
+  if (!this->parse_descriptors_() && !this->parse_rtl8152_() && !this->parse_vendor_() && !this->parse_rndis_()) {
+    ESP_LOGW(TAG, "No supported network function with a data interface on this device");
     this->report_connected_();
+    return;
+  }
+  if (this->proto_ == Proto::RTL8152) {
+    if (!this->claim_interface(this->data_intf_, 0)) {
+      ESP_LOGE(TAG, "Claiming interface %u failed", this->data_intf_);
+      this->report_connected_();
+      return;
+    }
+    this->data_claimed_ = true;
+    ESP_LOGI(TAG, "RTL8152 on interface %u (notify 0x%02X, data 0x%02X / 0x%02X)", this->data_intf_, this->notify_ep_,
+             this->in_ep_, this->out_ep_);
+    this->rtl_start_(generation);
+    return;
+  }
+  if (this->proto_ >= Proto::ASIX && this->proto_ != Proto::RNDIS) {
+    if (!this->claim_interface(this->data_intf_, 0)) {
+      ESP_LOGE(TAG, "Claiming interface %u failed", this->data_intf_);
+      this->report_connected_();
+      return;
+    }
+    this->data_claimed_ = true;
+    ESP_LOGI(TAG, "Vendor adapter on interface %u (notify 0x%02X, data 0x%02X / 0x%02X)", this->data_intf_,
+             this->notify_ep_, this->in_ep_, this->out_ep_);
+    this->vnd_start_(generation);
     return;
   }
   if (!this->claim_interface(this->comm_intf_, 0)) {
@@ -277,8 +380,12 @@ void USBEthernet::on_connected() {
   }
   this->data_claimed_ = true;
   ESP_LOGI(TAG, "%s on interfaces %u / %u (notify 0x%02X, data 0x%02X / 0x%02X)",
-           this->proto_ == Proto::NCM ? "CDC-NCM" : "CDC-ECM", this->comm_intf_, this->data_intf_, this->notify_ep_,
-           this->in_ep_, this->out_ep_);
+           this->proto_ == Proto::NCM ? "CDC-NCM" : this->proto_ == Proto::RNDIS ? "RNDIS" : "CDC-ECM", this->comm_intf_,
+           this->data_intf_, this->notify_ep_, this->in_ep_, this->out_ep_);
+  if (this->proto_ == Proto::RNDIS) {
+    this->rndis_start_(generation);
+    return;
+  }
   this->next_(generation, Step::MAC);
 }
 
@@ -295,6 +402,12 @@ void USBEthernet::control_(uint32_t generation, uint8_t type, uint8_t request, u
           this->read_mac_(status.data, status.data_len);
         if (ok && step == Step::NTB_PARAMS)
           this->read_ntb_params_(status.data, status.data_len);
+        if (ok && step >= Step::RTL_VERSION)
+          this->rtl_capture_(status.data, status.data_len);
+        if (ok && step == Step::VND)
+          this->vnd_capture_(status.data, status.data_len);
+        if (step == Step::RNDIS)
+          this->rndis_capture_(ok ? status.data : nullptr, ok ? status.data_len : 0);
         this->defer([this, generation, ok]() { this->step_(generation, ok); });
       },
       data, w_length);
@@ -355,10 +468,26 @@ void USBEthernet::next_(uint32_t generation, Step step) {
 void USBEthernet::step_(uint32_t generation, bool ok) {
   if (generation != this->generation_.load(std::memory_order_acquire))
     return;
+  if (this->step_state_ >= Step::RTL_VERSION) {
+    this->rtl_step_(generation, ok);
+    return;
+  }
+  if (this->step_state_ == Step::VND) {
+    this->vnd_step_(generation, ok);
+    return;
+  }
+  if (this->step_state_ == Step::RNDIS) {
+    this->rndis_step_(generation, ok);
+    return;
+  }
   switch (this->step_state_) {
     case Step::MAC:
       if (!ok || !this->mac_valid_)
         this->fallback_mac_();
+      if (this->proto_ == Proto::RTL8152) {
+        this->rtl_begin_init_(generation);
+        return;
+      }
       this->next_(generation, this->proto_ == Proto::NCM ? Step::NTB_PARAMS : Step::FILTER);
       return;
     case Step::NTB_PARAMS:
@@ -476,6 +605,11 @@ bool USBEthernet::start_data_() {
   if (this->proto_ == Proto::ECM) {
     this->rx_size_ = round_up(this->max_segment_, this->in_mps_);
     this->tx_size_ = round_up(this->max_segment_, this->out_mps_);
+  } else if (this->proto_ == Proto::RTL8152) {
+    this->rx_size_ = RTL8152_RX_SIZE;
+    this->tx_size_ = round_up(ETH_FRAME_MAX + RTL8152_TX_DESC_SIZE, this->out_mps_);
+  } else if (this->proto_ >= Proto::ASIX) {
+    this->vnd_sizes_();
   } else {
     this->tx_size_ = std::min<size_t>(this->ntb_out_max_, NTB_LIMIT);
   }
@@ -543,6 +677,7 @@ void USBEthernet::stop_data_() {
 void USBEthernet::on_disconnected() {
   this->generation_.fetch_add(1, std::memory_order_acq_rel);
   this->stop_data_();
+  this->free_rx_assembly_();
   if (this->link_up_)
     this->link_down_actions_();
   this->link_up_ = false;
@@ -673,9 +808,11 @@ void USBEthernet::release_slot_(DataXfer &x) {
 void USBEthernet::tx_cb_(usb_transfer_t *xfer) {
   auto *x = static_cast<DataXfer *>(xfer->context);
   USBEthernet *self = x->owner;
-  if (xfer->status == USB_TRANSFER_STATUS_NO_DEVICE || xfer->status == USB_TRANSFER_STATUS_CANCELED) {
-    self->retire_(*x);
-    return;
+  if (xfer->status == USB_TRANSFER_STATUS_COMPLETED) {
+    self->tx_sent_.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    self->tx_failed_.fetch_add(1, std::memory_order_relaxed);
+    self->tx_last_status_.store(xfer->status, std::memory_order_relaxed);
   }
   self->release_slot_(*x);
   xSemaphoreGive(self->tx_sem_);
@@ -684,6 +821,10 @@ void USBEthernet::tx_cb_(usb_transfer_t *xfer) {
 void USBEthernet::handle_rx_(const uint8_t *data, size_t len) {
   if (this->proto_ == Proto::NCM) {
     this->handle_ntb_(data, len);
+  } else if (this->proto_ == Proto::RTL8152) {
+    this->handle_rtl_rx_(data, len);
+  } else if (this->proto_ >= Proto::ASIX) {
+    this->handle_vnd_rx_(data, len);
   } else {
     this->deliver_(data, len);
   }
@@ -734,9 +875,18 @@ void USBEthernet::deliver_(const uint8_t *data, size_t len) {
   }
   memcpy(buf, data, len);
   esp_netif_receive(this->netif_, buf, len, nullptr);
+  this->rx_frames_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void USBEthernet::handle_notification_(const uint8_t *data, size_t len) {
+  if (this->proto_ == Proto::RTL8152) {
+    this->handle_rtl_notification_(data, len);
+    return;
+  }
+  if (this->proto_ >= Proto::ASIX) {
+    this->handle_vnd_notification_(data, len);
+    return;
+  }
   if (len < 8)
     return;
   const uint32_t generation = this->generation_.load(std::memory_order_acquire);
@@ -768,19 +918,17 @@ esp_err_t USBEthernet::send_frame_(const uint8_t *frame, size_t len) {
   if (!this->running_.load(std::memory_order_acquire))
     return ESP_FAIL;
   DataXfer *slot = nullptr;
-  for (uint8_t attempt = 0; attempt < 2 && slot == nullptr; attempt++) {
-    for (auto &x : this->tx_) {
-      uint8_t expected = XFER_IDLE;
-      if (x.state.compare_exchange_strong(expected, XFER_BUSY, std::memory_order_acq_rel)) {
-        slot = &x;
-        break;
-      }
+  for (auto &x : this->tx_) {
+    uint8_t expected = XFER_IDLE;
+    if (x.state.compare_exchange_strong(expected, XFER_BUSY, std::memory_order_acq_rel)) {
+      slot = &x;
+      break;
     }
-    if (slot == nullptr && attempt == 0 && xSemaphoreTake(this->tx_sem_, pdMS_TO_TICKS(TX_WAIT_MS)) != pdTRUE)
-      return ESP_ERR_TIMEOUT;
   }
-  if (slot == nullptr)
+  if (slot == nullptr) {
+    this->tx_dropped_.fetch_add(1, std::memory_order_relaxed);
     return ESP_ERR_TIMEOUT;
+  }
   if (!this->running_.load(std::memory_order_acquire)) {
     this->retire_(*slot);
     return ESP_FAIL;
@@ -810,6 +958,18 @@ esp_err_t USBEthernet::send_frame_(const uint8_t *frame, size_t len) {
     put16(out + ndp + 8, static_cast<uint16_t>(datagram));
     put16(out + ndp + 10, static_cast<uint16_t>(len));
     memcpy(out + datagram, frame, len);
+  } else if (this->proto_ == Proto::RTL8152) {
+    if (len + RTL8152_TX_DESC_SIZE > this->tx_size_) {
+      this->release_slot_(*slot);
+      return ESP_ERR_INVALID_SIZE;
+    }
+    total = this->rtl_fill_tx_(out, frame, len);
+  } else if (this->proto_ >= Proto::ASIX) {
+    total = this->vnd_fill_tx_(out, frame, len);
+    if (total == 0) {
+      this->release_slot_(*slot);
+      return ESP_ERR_INVALID_SIZE;
+    }
   } else {
     if (len > this->tx_size_) {
       this->release_slot_(*slot);
@@ -817,7 +977,8 @@ esp_err_t USBEthernet::send_frame_(const uint8_t *frame, size_t len) {
     }
     memcpy(out, frame, len);
   }
-  const bool zlp = total % this->out_mps_ == 0 && !(this->proto_ == Proto::NCM && total == this->ntb_out_max_);
+  const bool zlp = this->proto_ < Proto::RTL8152 && total % this->out_mps_ == 0 &&
+                   !(this->proto_ == Proto::NCM && total == this->ntb_out_max_);
   slot->xfer->flags = zlp ? USB_TRANSFER_FLAG_ZERO_PACK : 0;
   if (!this->submit_(*slot, total)) {
     this->release_slot_(*slot);

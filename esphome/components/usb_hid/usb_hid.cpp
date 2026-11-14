@@ -67,16 +67,21 @@ void USBHIDClient::loop() {
   usb_host::USBClient::loop();
 }
 
-// A HID interface's output reports go over the control pipe (SET_REPORT): its interrupt OUT gets no pipe
-// (and holds no host channel) unless a pad driver talks to the device over it (hid/gamepad.h), or the
-// Thrustmaster wheel setup (thrustmaster_()). Vendor pad interfaces (Xbox, MCE) keep theirs.
+static bool xbox360_out_used(uint16_t vid, uint16_t pid) {
+  return vid == 0x045E || (vid == 0x046D && (pid == 0xC21E || pid == 0xC21F));
+}
+
 uint32_t USBHIDClient::skipped_endpoints_(const usb_device_desc_t *desc, const usb_config_desc_t *config,
                                           const usb_intf_desc_t *alt) const {
-  if (alt->bInterfaceClass != USB_CLASS_HID)
+  const bool xbox360_wired = alt->bInterfaceClass == 0xFF && alt->bInterfaceSubClass == XBOX_SUBCLASS &&
+                             alt->bInterfaceProtocol == XBOX_PROTOCOL_WIRED;
+  if (xbox360_wired) {
+    if (xbox360_out_used(desc->idVendor, desc->idProduct))
+      return 0;
+  } else if (alt->bInterfaceClass != USB_CLASS_HID || (desc->idVendor == 0x044F && desc->idProduct == 0xB65D) ||
+             hid::has_gamepad_driver(hid::HIDBus::USB, desc->idVendor, desc->idProduct)) {
     return 0;
-  if ((desc->idVendor == 0x044F && desc->idProduct == 0xB65D) ||
-      hid::has_gamepad_driver(hid::HIDBus::USB, desc->idVendor, desc->idProduct))
-    return 0;
+  }
   uint32_t skip = 0;
   usb_host::for_each_alt_endpoint(config, alt, [&skip](const usb_ep_desc_t *ep) {
     if ((ep->bEndpointAddress & 0x80) == 0 &&
