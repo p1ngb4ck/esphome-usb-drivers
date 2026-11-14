@@ -157,6 +157,7 @@ async def to_code(config):
         cg.add_define("USE_USB_BLUETOOTH_H4")
     if config[CONF_C6_OFFLOAD]:
         cg.add_define("USE_USB_BLUETOOTH_C6_OFFLOAD")
+        add_idf_sdkconfig_option("CONFIG_ESP_HOSTED_HOST_FEAT_BT", True)
     if config[CONF_BLUEDROID]:
         request_bluetooth()
         add_idf_sdkconfig_option("CONFIG_BT_BLUEDROID_ENABLED", True)

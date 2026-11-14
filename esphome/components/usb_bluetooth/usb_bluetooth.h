@@ -50,12 +50,17 @@ class USBBluetooth : public usb_host::USBClient {
   // Bluedroid's transport operations; its HCI task calls these.
   void hci_send(uint8_t *data, uint16_t len);
   bool hci_send_available();
+  bool hci_write(const uint8_t *data, uint16_t len);
+#endif
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+  void resume_held();
 #endif
 
  protected:
   static constexpr uint8_t HCI_CLASS = 0xE0;
   static constexpr size_t EVENT_MAX = 2 + 255;
   static constexpr size_t ACL_MAX = 4 + 1021;
+  static constexpr size_t ACL_REST = 512;
 
   void on_connected() override;
   void on_disconnected() override;
@@ -84,7 +89,8 @@ class USBBluetooth : public usb_host::USBClient {
 #ifdef USE_USB_BLUETOOTH_H4
   bool send_acl_(const uint8_t *data, size_t len);
   // USB task: an H4 packet from the dongle to the host stack.
-  void to_stack_(uint8_t *h4, size_t len);
+  bool to_stack_(uint8_t *h4, size_t len);
+  bool feed_acl_(const uint8_t *in, size_t count);
 #endif
 #ifdef USE_USB_BLUETOOTH_HCI_SPLIT
   void start_split_();
@@ -114,6 +120,14 @@ class USBBluetooth : public usb_host::USBClient {
   std::atomic<bool> stack_attached_{false};
   // Bluedroid refused a send for want of transfer slots; tell it once one frees up.
   std::atomic<bool> send_blocked_{false};
+#ifdef USE_USB_BLUETOOTH_C6_OFFLOAD
+  std::atomic<bool> held_event_{false};
+  std::atomic<bool> held_acl_{false};
+  size_t held_event_len_{0};
+  size_t held_acl_len_{0};
+  uint8_t *acl_rest_{nullptr};
+  size_t acl_rest_len_{0};
+#endif
 #ifdef USE_BT_PERSISTENCE
   // Bluedroid's start waits for its pairing data.
   std::atomic<bool> waiting_for_store_{false};
