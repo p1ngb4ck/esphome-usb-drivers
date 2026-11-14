@@ -181,7 +181,7 @@ void RP2UartComponent::write_array(const uint8_t *data, size_t len) {
   this->serial_->write(data, len);
 #ifdef USE_UART_DEBUGGER
   for (size_t i = 0; i < len; i++) {
-    this->debug_callback_.call(UART_DIRECTION_TX, data[i], StringRef());
+    this->debug_callback_.call(UART_DIRECTION_TX, data[i]);
   }
 #endif
 }
@@ -197,7 +197,7 @@ bool RP2UartComponent::read_array(uint8_t *data, size_t len) {
   this->serial_->readBytes(data, len);
 #ifdef USE_UART_DEBUGGER
   for (size_t i = 0; i < len; i++) {
-    this->debug_callback_.call(UART_DIRECTION_RX, data[i], StringRef());
+    this->debug_callback_.call(UART_DIRECTION_RX, data[i]);
   }
 #endif
   return true;
@@ -210,5 +210,4 @@ UARTFlushResult RP2UartComponent::flush() {
 }
 
 }  // namespace esphome::uart
-
 #endif  // USE_RP2

@@ -154,7 +154,7 @@ void LibreTinyUARTComponent::write_array(const uint8_t *data, size_t len) {
   this->serial_->write(data, len);
 #ifdef USE_UART_DEBUGGER
   for (size_t i = 0; i < len; i++) {
-    this->debug_callback_.call(UART_DIRECTION_TX, data[i], StringRef());
+    this->debug_callback_.call(UART_DIRECTION_TX, data[i]);
   }
 #endif
 }
@@ -172,7 +172,7 @@ bool LibreTinyUARTComponent::read_array(uint8_t *data, size_t len) {
   this->serial_->readBytes(data, len);
 #ifdef USE_UART_DEBUGGER
   for (size_t i = 0; i < len; i++) {
-    this->debug_callback_.call(UART_DIRECTION_RX, data[i], StringRef());
+    this->debug_callback_.call(UART_DIRECTION_RX, data[i]);
   }
 #endif
   return true;
@@ -199,5 +199,4 @@ void LibreTinyUARTComponent::check_logger_conflict() {
 }
 
 }  // namespace esphome::uart
-
 #endif  // USE_LIBRETINY

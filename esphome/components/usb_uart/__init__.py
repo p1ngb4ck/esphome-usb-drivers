@@ -19,11 +19,11 @@ from esphome.components.usb_host import (
     CONF_PID,
     CONF_VID,
     get_max_packet_size,
-    get_max_transfer_requests,
     register_usb_client,
     usb_device_schema,
     validate_usb_clients,
 )
+from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_BAUD_RATE,
@@ -37,9 +37,9 @@ from esphome.const import (
 )
 from esphome.core import CORE, ID
 from esphome.cpp_types import Component
-import esphome.final_validate as fv
 from esphome.types import ConfigType
 
+AUTO_LOAD = ["uart", "usb_host", "bytebuffer"]
 CODEOWNERS = ["@clydebarrow"]
 DOMAIN = "usb_uart"
 
@@ -47,18 +47,15 @@ usb_uart_ns = cg.esphome_ns.namespace("usb_uart")
 # One client for every adapter; the type classes are the per-adapter drivers it makes on plug
 USBUartClient = usb_uart_ns.class_("USBUartClient", Component)
 USBUartComponent = usb_uart_ns.class_("USBUartComponent")
-USBUartDriverLink = usb_uart_ns.class_("USBUartDriverLink", Component)
 UartType = usb_uart_ns.enum("UartType", is_class=True)
 UART_TYPES = {
     "CdcAcm": UartType.CDC_ACM,
     "CH34X": UartType.CH34X,
-    "CH934X": UartType.CH934X,
     "CP210X": UartType.CP210X,
     "FT23XX": UartType.FT23XX,
     "PL2303": UartType.PL2303,
 }
 USBUartChannel = usb_uart_ns.class_("USBUartChannel", UARTComponent)
-CH934XChannel = usb_uart_ns.class_("CH934XChannel", USBUartChannel)
 
 
 def is_usb_uart_channel(uart_id: ID, full_config: ConfigType) -> bool:
@@ -79,14 +76,8 @@ UART_STOP_BITS_OPTIONS = UARTStopBitsOptions.options(
 )
 
 DEFAULT_BAUD_RATE = 9600
-# CH934x TX packets carry a 3-byte header ([port, len_lo, len_hi]) inside every chunk, so the
-# usable payload per chunk is that much smaller. Kept in sync with CH934XChannel::TX_HEADER_SIZE.
-CH934X_TX_HEADER_SIZE = 3
-CONF_DEBUG_ADD_UART_SETTINGS = "debug_add_uart_settings"
 CONF_CLAIM_NOTIFICATION_EP = "claim_notification_ep"
 CONF_CLAIM_COMM_INTERFACE = "claim_comm_interface"
-CONF_DRIVERS = "drivers"
-CONF_USB_UART_ID = "usb_uart_id"
 
 
 class Type:
@@ -129,20 +120,7 @@ class Type:
         )
 
 
-class MpxType(Type):
-    @property
-    def max_channels(self):
-        # Multiplexed devices aren't restricted by the number of available USB endpoints
-        return self._max_channels
-
-
 uart_types = (
-    MpxType("CH9344", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
-    MpxType("CH9344L", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
-    MpxType("CH9344Q", 0x1A86, 0xE018, "CH934X", 4, channel_cls=CH934XChannel),
-    MpxType("CH348", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
-    MpxType("CH348L", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
-    MpxType("CH348Q", 0x1A86, 0x55D9, "CH934X", 8, channel_cls=CH934XChannel),
     Type(
         "CDC_ACM", 0, 0, "CdcAcm", 1, baud_rate_required=False, has_comm_interface=True
     ),
@@ -177,52 +155,22 @@ uart_types = (
         baud_rate_required=False,
         has_comm_interface=True,
     ),
-    Type(
-        "IRTOY",
-        0x04D8,
-        0xFD08,
-        "CdcAcm",
-        1,
-        baud_rate_required=False,
-        has_comm_interface=True,
-    ),
 )
 
 _TYPES_BY_NAME = {it.name: it for it in uart_types}
 
 
-DRIVER_NAMES = tuple(
-    sorted({it.driver.lower() for it in uart_types if it.driver is not None})
+def _driver_define(driver: str) -> str:
+    return f"USE_USB_UART_{driver}"
+
+
+FILTER_SOURCE_FILES = filter_source_files_from_defines(
+    {
+        f"{it.driver.lower()}.cpp": _driver_define(it.driver)
+        for it in uart_types
+        if it.driver is not None
+    }
 )
-
-
-def _driver_component(driver: str) -> str:
-    return f"usb_uart_{driver}"
-
-
-def AUTO_LOAD() -> list[str]:
-    block = (CORE.raw_config or {}).get(DOMAIN)
-    selected = (
-        block.get(CONF_DRIVERS, DRIVER_NAMES)
-        if isinstance(block, dict)
-        else DRIVER_NAMES
-    )
-    if selected is None:
-        selected = ()
-    elif isinstance(selected, str):
-        selected = (selected,)
-    wanted = {str(name).lower() for name in selected}
-    return ["uart", "usb_host", "bytebuffer"] + [
-        _driver_component(name) for name in DRIVER_NAMES if name in wanted
-    ]
-
-
-def _validate_debug_add_uart_settings(config):
-    if config.get(CONF_DEBUG_ADD_UART_SETTINGS) and not config.get(CONF_DEBUG):
-        raise cv.Invalid(
-            f"'{CONF_DEBUG_ADD_UART_SETTINGS}' requires '{CONF_DEBUG}' to be true"
-        )
-    return config
 
 
 def _channel_limit(type_: Type) -> Callable[[list], list]:
@@ -278,14 +226,10 @@ def channel_schema(type_: "Type") -> cv.Schema:
                                 cv.Optional(CONF_DEBUG, default=False): cv.boolean,
                                 cv.Optional(CONF_DEBUG_PREFIX, default=""): cv.string,
                                 cv.Optional(
-                                    CONF_DEBUG_ADD_UART_SETTINGS, default=False
-                                ): cv.boolean,
-                                cv.Optional(
                                     CONF_FLUSH_TIMEOUT, default="100ms"
                                 ): cv.positive_time_period_milliseconds,
                             }
                         ),
-                        _validate_debug_add_uart_settings,
                     )
                 ),
                 _channel_limit(type_),
@@ -342,9 +286,6 @@ CONFIG_SCHEMA = cv.All(
     _entries_block,
     usb_device_schema(USBUartClient).extend(
         {
-            cv.Optional(CONF_DRIVERS, default=list(DRIVER_NAMES)): cv.ensure_list(
-                cv.one_of(*DRIVER_NAMES, lower=True)
-            ),
             cv.Optional(CONF_DEVICES): cv.All(
                 cv.ensure_list(
                     cv.typed_schema(
@@ -359,23 +300,6 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-def _final_validate(config: ConfigType) -> ConfigType:
-    full_config = fv.full_config.get()
-    for index, device in enumerate(config.get(CONF_DEVICES) or []):
-        driver = _TYPES_BY_NAME[device[CONF_TYPE]].driver
-        if driver is None or _driver_component(driver.lower()) in full_config:
-            continue
-        raise cv.Invalid(
-            f"Device type {device[CONF_TYPE]} needs the driver '{driver.lower()}'; "
-            f"add it to '{CONF_DRIVERS}'",
-            path=[CONF_DEVICES, index, CONF_TYPE],
-        )
-    return config
-
-
-FINAL_VALIDATE_SCHEMA = _final_validate
-
-
 async def to_code(config: ConfigType) -> None:
     devices = config.get(CONF_DEVICES) or []
     # The output chunk pool/queue are compile-time-sized templates shared by all channel
@@ -383,45 +307,29 @@ async def to_code(config: ConfigType) -> None:
     # one entry.
     type_by_name = {t.name: t for t in uart_types}
     mps = get_max_packet_size()
-    payload = mps - CH934X_TX_HEADER_SIZE
 
     output_chunk_count = 3
     for device in devices:
         device_type = type_by_name.get(device[CONF_TYPE])
-        if isinstance(device_type, MpxType) and payload > 0:
-            # A multiplexed device routes every channel's TX through the shared queue on
-            # channel 0, and that queue only drains between loops -- so the pool has to hold
-            # ceil(buffer / payload) chunks for EVERY channel at once, not just the largest.
-            need = (
-                sum(
-                    -(-channel[CONF_BUFFER_SIZE] // payload)
-                    for channel in device[CONF_CHANNELS]
-                )
-                + 1
-            )
-        else:
-            device_max = max(
-                channel[CONF_BUFFER_SIZE] for channel in device[CONF_CHANNELS]
-            )
-            need = max(device_max // mps, 2) + 1
+        device_max = max(
+            channel[CONF_BUFFER_SIZE] for channel in device[CONF_CHANNELS]
+        )
+        need = max(device_max // mps, 2) + 1
         output_chunk_count = max(output_chunk_count, need)
     # LockFreeQueue/EventPool index slots with a uint8_t, so the count cannot exceed 255.
     output_chunk_count = min(output_chunk_count, 255)
     cg.add_define("USB_UART_OUTPUT_CHUNK_COUNT", output_chunk_count)
 
-    # Multiplexed (CH934x) drivers initialise their channels in parallel over a single shared
-    # command endpoint. Cap the concurrent init "lanes" at the transfer-request pool size so a
-    # wide device cannot exhaust it during setup.
-    max_init_lanes = get_max_transfer_requests()
     cg.add_define("USE_USB_BULK_TRANSFERS")
     cg.add_define("USE_USB_CONTROL_TRANSFERS")
 
+    # Every driver: an adapter of any type may be plugged in without an entry
+    for driver in {it.driver for it in uart_types if it.driver is not None}:
+        cg.add_define(_driver_define(driver))
     var = await register_usb_client(config)
     for device in devices:
         device_type = type_by_name[device[CONF_TYPE]]
         lanes = 1
-        if isinstance(device_type, MpxType):
-            lanes = min(len(device[CONF_CHANNELS]), max_init_lanes)
         cg.add(
             var.add_entry(
                 device.get(CONF_VID, 0),
@@ -448,6 +356,3 @@ async def to_code(config: ConfigType) -> None:
             cg.add(var.add_entry_channel(chvar))
             if channel[CONF_DEBUG]:
                 cg.add_define("USE_UART_DEBUGGER")
-                if channel[CONF_DEBUG_ADD_UART_SETTINGS]:
-                    cg.add(chvar.set_debug_add_settings(True))
-                    cg.add_define("UART_DEBUGGER_ADD_SETTINGS")

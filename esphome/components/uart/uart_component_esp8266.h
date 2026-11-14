@@ -104,5 +104,4 @@ class ESP8266UartComponent final : public UARTComponent, public Component {
 };
 
 }  // namespace esphome::uart
-
 #endif  // USE_ESP8266
