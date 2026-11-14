@@ -71,6 +71,7 @@ class USBStorageClient : public usb_host::USBClient {
   void set_cdrom(usb_cdrom::USBCdrom *cdrom) { this->cdrom_ = cdrom; }
 #endif
 
+  void setup() override;
   void loop() override;
 
   /// A stick is mounted (any, or the one at @p mount_path).
@@ -94,7 +95,11 @@ class USBStorageClient : public usb_host::USBClient {
   /// The entry naming this stick, else one for any stick, whose mount path is free (-1: none).
   int find_entry_(uint16_t vid, uint16_t pid) const;
   bool path_in_use_(const char *mount_path) const;
+  void scan_restart_();
+  void scan_step_();
 
+  bool scan_running_{false};
+  uint8_t scan_steps_{0};
   const USBStorageEntry *entries_{nullptr};
   uint8_t entry_count_{0};
   uint8_t max_devices_{1};
@@ -150,6 +155,7 @@ class USBStorageDevice : public esphome::storage::FilesystemStorage, public esph
   uint32_t get_sector_count() const { return this->sector_count_; }
   uint32_t get_sector_size() const { return this->sector_size_; }
   bool is_disk_ready() const { return this->disk_ready_; }
+  bool removable_media() const override { return true; }
 
   // storage::FilesystemStorage interface
   storage::StorageError get_info(storage::StorageInfo *info) override;

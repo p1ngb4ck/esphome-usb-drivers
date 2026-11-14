@@ -551,6 +551,41 @@ bool USBStorageDevice::scsi_write_(uint32_t lba, const uint8_t *buf, uint32_t co
 // USBStorageClient -- the sticks
 // ─────────────────────────────────────────────────────────────────────────────
 
+static constexpr uint32_t SCAN_TIMER_ID = 1;
+static constexpr uint32_t SCAN_STEP_MS = 1000;
+static constexpr uint8_t SCAN_QUIET_STEPS = 3;
+
+void USBStorageClient::setup() {
+  usb_host::USBClient::setup();
+  if (this->is_failed() || storage::global_storage_registry == nullptr)
+    return;
+  storage::global_storage_registry->removable_scan_begin();
+  this->scan_running_ = true;
+  this->host_->add_on_devices_callback([this]() { this->scan_restart_(); });
+  this->scan_step_();
+}
+
+void USBStorageClient::scan_restart_() { this->scan_steps_ = 0; }
+
+void USBStorageClient::scan_step_() {
+  bool done = this->scan_steps_ >= SCAN_QUIET_STEPS;
+  for (auto *stick : this->sticks_) {
+    bool connecting = !stick->disk_ready_;
+#ifdef USE_USB_CDROM
+    connecting = connecting && stick->cdrom_ == nullptr;
+#endif
+    done = done && !connecting;
+  }
+  if (done) {
+    this->scan_running_ = false;
+    storage::global_storage_registry->removable_scan_end();
+    return;
+  }
+  if (App.is_setup_complete() && this->scan_steps_ < SCAN_QUIET_STEPS)
+    this->scan_steps_++;
+  this->set_timeout(SCAN_TIMER_ID, SCAN_STEP_MS, [this]() { this->scan_step_(); });
+}
+
 void USBStorageClient::loop() {
   // A safe eject waits until nothing references its stick
   bool waiting = false;
@@ -598,6 +633,7 @@ int USBStorageClient::find_entry_(uint16_t vid, uint16_t pid) const {
 }
 
 void USBStorageClient::on_device_connected(usb_host::UsbDevice &dev) {
+  this->scan_restart_();
   auto *stick = new USBStorageDevice(this, &dev);  // NOLINT: deleted in free_device_context
   dev.context = stick;
   this->sticks_.push_back(stick);
@@ -970,7 +1006,7 @@ storage::StorageError USBStorageDevice::get_info(storage::StorageInfo *info) {
     FATFS *fs;
     DWORD fre_clust;
     char path[8];
-    snprintf(path, sizeof(path), "%s/", this->mount_path_);
+    snprintf(path, sizeof(path), "%s/", this->fatfs_drive_str_);
     if (f_getfree(path, &fre_clust, &fs) == FR_OK) {
       DWORD tot_sect = (fs->n_fatent - 2) * fs->csize;
       DWORD fre_sect = fre_clust * fs->csize;
