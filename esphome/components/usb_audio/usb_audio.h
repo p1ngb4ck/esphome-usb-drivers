@@ -130,12 +130,6 @@ using SpeakerRoute = std::function<void(speaker::Speaker *sink, const char *name
                                          uint8_t bits_per_sample, uint8_t channels, bool added)>;
 using MicrophoneRoute = std::function<void(microphone::Microphone *mic, const char *name, uint32_t key, bool added)>;
 
-struct RouteAttachment {
-  bool (*speaker_holds)(const speaker::Speaker *);
-  void (*speaker_forget)(speaker::Speaker *);
-  void (*microphone_forget)(microphone::Microphone *);
-};
-
 class USBAudioSink : public speaker::Speaker {
  public:
   explicit USBAudioSink(USBAudioClient *client) : client_(client) {}
@@ -212,7 +206,6 @@ class USBAudioCapture : public microphone::Microphone {
   bool running() const { return this->running_.load(std::memory_order_relaxed); }
   bool stopping() const { return this->state_ == microphone::STATE_STOPPING; }
   void set_delivering(bool delivering) { this->delivering_.store(delivering); }
-  bool delivering() const { return this->delivering_.load(); }
   void set_timer_id(uint32_t id) { this->timer_id_ = id; }
   void add_enabled_channel(uint8_t channel) { this->enabled_mask_ |= static_cast<uint8_t>(1u << channel); }
 
@@ -497,7 +490,6 @@ class USBAudioClient : public usb_host::USBClient {
   // device it sees. vid and pid stay 0 by default, which the host reads as "any", and are
   // narrowed from the config when the user names a specific device.
   USBAudioClient() : usb_host::USBClient(0, 0) { this->add_class_match(USB_CLASS_AUDIO); }
-  ~USBAudioClient();
 
   void set_vid(uint16_t vid) { this->vid_ = vid; }
   void set_pid(uint16_t pid) { this->pid_ = pid; }
@@ -529,8 +521,6 @@ class USBAudioClient : public usb_host::USBClient {
 
   void add_speaker_route(SpeakerRoute route) { this->speaker_routes_.push_back(std::move(route)); }
   void add_microphone_route(MicrophoneRoute route) { this->microphone_routes_.push_back(std::move(route)); }
-  void attach_speaker(SpeakerRoute route, bool (*holds)(const speaker::Speaker *), void (*forget)(speaker::Speaker *));
-  void attach_microphone(MicrophoneRoute route, void (*forget)(microphone::Microphone *));
   void set_speaker(USBAudioSink *speaker) { this->speaker_ = speaker; }
   void set_microphone(USBAudioCapture *microphone) { this->microphone_ = microphone; }
 
@@ -570,8 +560,6 @@ class USBAudioClient : public usb_host::USBClient {
   void attach_fixed_();
   void release_device_(USBAudioDevice *device);
   void make_name_unique_(USBAudioDevice *device);
-  bool stop_after_devices_();
-  static void undo_attachments_(void *target, void *first, void *second);
 
   static void ctrl_task(void *param);
   bool post_ctrl_(CtrlOp op, USBAudioDevice *device, uint32_t seq);
@@ -579,9 +567,8 @@ class USBAudioClient : public usb_host::USBClient {
   void capture_task_loop_();
   void wake_capture_task_();
 
-  std::vector<SpeakerRoute, RAMAllocator<SpeakerRoute>> speaker_routes_;
-  std::vector<MicrophoneRoute, RAMAllocator<MicrophoneRoute>> microphone_routes_;
-  std::vector<RouteAttachment, RAMAllocator<RouteAttachment>> attachments_;
+  std::vector<SpeakerRoute> speaker_routes_;
+  std::vector<MicrophoneRoute> microphone_routes_;
   USBAudioSink *speaker_{nullptr};
   USBAudioCapture *microphone_{nullptr};
   std::vector<USBAudioSink *> sinks_;
