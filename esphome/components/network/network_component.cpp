@@ -10,6 +10,7 @@
 
 #ifdef USE_NETWORK_DEFAULT_ROUTE
 #include <algorithm>
+#include "util.h"
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
@@ -23,9 +24,6 @@
 #endif
 #ifdef USE_WIFI
 #include "esphome/components/wifi/wifi_component.h"
-#endif
-#ifdef USE_USB_ETHERNET
-#include "esphome/components/usb_ethernet/usb_ethernet.h"
 #endif
 #endif
 
@@ -109,11 +107,14 @@ static esp_netif_t *connected_ethernet_netif() {
 }
 
 static esp_netif_t *connected_usb_ethernet_netif() {
-#ifdef USE_USB_ETHERNET
-  auto *usb = usb_ethernet::global_usb_ethernet;
-  if (usb != nullptr && usb->is_connected())
-    return usb->get_esp_netif();
-#endif
+  if (addon_usb_ethernet != nullptr && addon_usb_ethernet->connected())
+    return addon_usb_ethernet->netif();
+  return nullptr;
+}
+
+static esp_netif_t *connected_usb_wifi_netif() {
+  if (addon_usb_wifi != nullptr && addon_usb_wifi->connected())
+    return addon_usb_wifi->netif();
   return nullptr;
 }
 
@@ -125,6 +126,8 @@ static esp_netif_t *connected_netif(NetworkInterface interface) {
       return connected_wifi_netif();
     case NetworkInterface::NETWORK_INTERFACE_USB_ETHERNET:
       return connected_usb_ethernet_netif();
+    case NetworkInterface::NETWORK_INTERFACE_USB_WIFI:
+      return connected_usb_wifi_netif();
     default:
       return nullptr;
   }

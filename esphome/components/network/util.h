@@ -4,6 +4,7 @@
 #include <span>
 #include <string>
 #include "esphome/core/helpers.h"
+#include "esphome/core/string_ref.h"
 #include "ip_address.h"
 
 #ifdef USE_ETHERNET
@@ -18,14 +19,22 @@
 #ifdef USE_OPENTHREAD
 #include "esphome/components/openthread/openthread.h"
 #endif
-#ifdef USE_USB_ETHERNET
-#include "esphome/components/usb_ethernet/usb_ethernet.h"
-#endif
 #ifdef USE_ESP32
 #include "esp_netif.h"
 #endif
 
 namespace esphome::network {
+
+#ifdef USE_ESP32
+struct AddOnInterface {
+  bool (*connected)();
+  bool (*link_up)();
+  esp_netif_t *(*netif)();
+  IPAddresses (*addresses)();
+};
+extern const AddOnInterface *addon_usb_ethernet;
+extern const AddOnInterface *addon_usb_wifi;
+#endif
 
 #if defined(USE_ESP32) && USE_NETWORK_IPV6
 /// Copies the IPv6 addresses of an esp_netif into `addresses[1..]`, warning once when some do not fit.
@@ -55,8 +64,10 @@ ESPHOME_ALWAYS_INLINE inline bool is_connected() {
     return true;
 #endif
 
-#ifdef USE_USB_ETHERNET
-  if (usb_ethernet::global_usb_ethernet != nullptr && usb_ethernet::global_usb_ethernet->is_connected())
+#ifdef USE_ESP32
+  if (addon_usb_ethernet != nullptr && addon_usb_ethernet->connected())
+    return true;
+  if (addon_usb_wifi != nullptr && addon_usb_wifi->connected())
     return true;
 #endif
 
@@ -84,6 +95,8 @@ static constexpr size_t USE_ADDRESS_BUFFER_SIZE = 70;
 /// device name into buf (so it includes the MAC suffix from name_add_mac_suffix).
 const char *get_use_address_to(std::span<char, USE_ADDRESS_BUFFER_SIZE> buf);
 IPAddresses get_ip_addresses();
+StringRef device_name();
+StringRef device_friendly_name();
 
 }  // namespace esphome::network
 #endif
