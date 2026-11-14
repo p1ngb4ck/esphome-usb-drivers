@@ -145,12 +145,7 @@ void RP2UartComponent::setup() {
     this->serial_ = serial;
   } else {
     ESP_LOGV(TAG, "Using Hardware Serial");
-    SerialUART *serial;
-    if (hw_uart == 0) {
-      serial = &Serial1;
-    } else {
-      serial = &Serial2;
-    }
+    SerialUART *serial = hw_uart == 0 ? &Serial1 : &Serial2;
     if (this->tx_pin_ != nullptr)
       serial->setTX(this->tx_pin_->get_pin());
     if (this->rx_pin_ != nullptr)
@@ -186,7 +181,7 @@ void RP2UartComponent::write_array(const uint8_t *data, size_t len) {
   this->serial_->write(data, len);
 #ifdef USE_UART_DEBUGGER
   for (size_t i = 0; i < len; i++) {
-    this->debug_callback_.call(UART_DIRECTION_TX, data[i]);
+    this->debug_callback_.call(UART_DIRECTION_TX, data[i], StringRef());
   }
 #endif
 }
@@ -202,7 +197,7 @@ bool RP2UartComponent::read_array(uint8_t *data, size_t len) {
   this->serial_->readBytes(data, len);
 #ifdef USE_UART_DEBUGGER
   for (size_t i = 0; i < len; i++) {
-    this->debug_callback_.call(UART_DIRECTION_RX, data[i]);
+    this->debug_callback_.call(UART_DIRECTION_RX, data[i], StringRef());
   }
 #endif
   return true;
@@ -215,4 +210,5 @@ UARTFlushResult RP2UartComponent::flush() {
 }
 
 }  // namespace esphome::uart
+
 #endif  // USE_RP2
