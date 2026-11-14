@@ -319,7 +319,10 @@ class UvcCamera : public camera::Camera {
   void request_key_frame() override;
   void on_encoded_released();
   void setup() override;
-  void add_listener(camera::CameraListener *listener) override { this->listeners_.push_back(listener); }
+  void add_listener(camera::CameraListener *listener) override {
+    this->listeners_.push_back(listener);
+    camera::note_listener(this->listeners_, listener);
+  }
   camera::CameraImageReader *create_image_reader() override { return new UvcImageReader(); }  // NOLINT
   void request_image(camera::CameraRequester requester) override;
   void start_stream(camera::CameraRequester requester) override;
