@@ -29,6 +29,9 @@ extern "C" {
 #include <freertos/FreeRTOSConfig.h>
 #include <freertos/task.h>
 
+#ifdef USE_BT_PERSISTENCE
+#include "esphome/components/bt_host/persistence.h"
+#endif
 #include <cstring>
 
 #ifdef USE_ARDUINO
@@ -147,7 +150,7 @@ static constexpr uint32_t HOSTED_BT_WDT_TIMEOUT_MS = 60000;
 void ESP32BLE::setup() {
   global_ble = this;
   // Preferences opens NVS in app_main(); a zero handle means it could not be opened, even after an erase
-  if (global_preferences->nvs_handle == 0) {
+  if (!global_preferences->nvs_ready) {
     ESP_LOGE(TAG, "NVS unavailable");
     this->mark_failed();
     return;
@@ -211,7 +214,8 @@ void ESP32BLE::advertising_refresh() {
   if (this->advertising_ref_count_ == 0) {
     this->advertising_->stop();
   } else {
-    this->advertising_->start();
+    this->advertising_->request_start();
+    App.wake_loop_threadsafe();
   }
 }
 
@@ -260,6 +264,16 @@ void ESP32BLE::advertising_add_service_uuid(ESPBTUUID uuid) {
   this->advertising_refresh();
 }
 
+void ESP32BLE::advertising_set_priority_uuid(ESPBTUUID uuid) {
+  this->advertising_init_();
+  this->advertising_->set_priority_uuid(uuid);
+}
+
+void ESP32BLE::advertising_clear_priority_uuid() {
+  if (this->advertising_ != nullptr)
+    this->advertising_->clear_priority_uuid();
+}
+
 void ESP32BLE::advertising_remove_service_uuid(ESPBTUUID uuid) {
   this->advertising_init_();
   this->advertising_->remove_service_uuid(uuid);
@@ -273,11 +287,27 @@ void ESP32BLE::advertising_init_() {
     return;
   this->advertising_ = new BLEAdvertising(this->advertising_cycle_time_);  // NOLINT(cppcoreguidelines-owning-memory)
 
-  this->advertising_->set_scan_response(true);
-  this->advertising_->set_min_preferred_interval(0x06);
   this->advertising_->set_appearance(this->appearance_);
 }
 #endif
+
+const char *ESP32BLE::device_name(char *buffer) const {
+  if (this->name_ != nullptr) {
+    if (!App.is_name_add_mac_suffix_enabled())
+      return this->name_;
+    // Last 6 characters of the 12 character MAC address string
+    constexpr size_t mac_address_suffix_len = 6;
+    char mac_addr[MAC_ADDRESS_BUFFER_SIZE];
+    get_mac_address_into_buffer(mac_addr);
+    make_name_with_suffix_to(buffer, DEVICE_NAME_BUFFER_SIZE, this->name_, strlen(this->name_), '-',
+                             mac_addr + mac_address_suffix_len, mac_address_suffix_len);
+    return buffer;
+  }
+  const auto &app_name = App.get_name();
+  truncate_name_to(buffer, DEVICE_NAME_BUFFER_SIZE, app_name.c_str(), app_name.length(),
+                   App.is_name_add_mac_suffix_enabled() ? MAC_ADDRESS_SUFFIX_WITH_SEPARATOR_LEN : 0);
+  return buffer;
+}
 
 bool ESP32BLE::ble_setup_() {
   esp_err_t err;
@@ -389,32 +419,8 @@ bool ESP32BLE::ble_setup_() {
   }
 #endif
 
-  // BLE device names are limited to 20 characters
-  // Buffer: 20 chars + null terminator
-  constexpr size_t ble_name_max_len = 21;
-  char name_buffer[ble_name_max_len];
-  const char *device_name;
-
-  if (this->name_ != nullptr) {
-    if (App.is_name_add_mac_suffix_enabled()) {
-      // MAC address suffix length (last 6 characters of 12-char MAC address string)
-      constexpr size_t mac_address_suffix_len = 6;
-      char mac_addr[MAC_ADDRESS_BUFFER_SIZE];
-      get_mac_address_into_buffer(mac_addr);
-      const char *mac_suffix_ptr = mac_addr + mac_address_suffix_len;
-      make_name_with_suffix_to(name_buffer, sizeof(name_buffer), this->name_, strlen(this->name_), '-', mac_suffix_ptr,
-                               mac_address_suffix_len);
-      device_name = name_buffer;
-    } else {
-      device_name = this->name_;
-    }
-  } else {
-    const auto &app_name = App.get_name();
-    truncate_name_to(name_buffer, sizeof(name_buffer), app_name.c_str(), app_name.length(),
-                     App.is_name_add_mac_suffix_enabled() ? MAC_ADDRESS_SUFFIX_WITH_SEPARATOR_LEN : 0);
-    device_name = name_buffer;
-  }
-
+  char name_buffer[DEVICE_NAME_BUFFER_SIZE];
+  const char *device_name = this->device_name(name_buffer);
   err = esp_ble_gap_set_device_name(device_name);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_ble_gap_set_device_name failed: %d", err);
@@ -523,15 +529,11 @@ void ESP32BLE::loop() {
     return;
   }
 
-#ifdef USE_ESP32_BLE_ADVERTISING
-  if (this->advertising_ != nullptr) {
-    this->advertising_->loop();
-  }
-#endif
-
   BLEEvent *ble_event = this->ble_events_.pop();
-  if (ble_event == nullptr)
+  if (ble_event == nullptr) {
+    this->advertising_loop_();
     return;
+  }
 
   do {
     switch (ble_event->type_) {
@@ -541,6 +543,11 @@ void ESP32BLE::loop() {
         esp_gatt_if_t gatts_if = ble_event->event_.gatts.gatts_if;
         esp_ble_gatts_cb_param_t *param = &ble_event->event_.gatts.gatts_param;
         ESP_LOGV(TAG, "gatts_event [esp_gatt_if: %d] - %d", gatts_if, event);
+#ifdef USE_ESP32_BLE_ADVERTISING
+        // A peripheral connect stops advertising, so drop a queued send; a handler that wants more refreshes again
+        if (event == ESP_GATTS_CONNECT_EVT && param->connect.link_role == 1)
+          this->advertising_cancel_start_();
+#endif
         this->gatts_event_callbacks_.call(event, gatts_if, param);
         break;
       }
@@ -630,6 +637,8 @@ void ESP32BLE::loop() {
   if (dropped > 0) {
     ESP_LOGW(TAG, "Dropped %u BLE events due to buffer overflow", dropped);
   }
+  // After the events, so refreshes they trigger go out in this pass
+  this->advertising_loop_();
 }
 
 void ESP32BLE::loop_handle_state_transition_not_active_() {
@@ -647,12 +656,20 @@ void ESP32BLE::loop_handle_state_transition_not_active_() {
       return;
     }
     this->drain_ble_events_();
+#ifdef USE_ESP32_BLE_ADVERTISING
+    this->advertising_cancel_start_();
+#endif
     // A status callback may have asked for BLE back, or restart() did; the stack is down now, so
     // that request becomes a bring-up.
     this->state_ = this->state_ == BLE_COMPONENT_STATE_ACTIVE || this->restart_requested_ ? BLE_COMPONENT_STATE_ENABLE
                                                                                           : BLE_COMPONENT_STATE_DISABLED;
     this->restart_requested_ = false;
   } else if (this->state_ == BLE_COMPONENT_STATE_ENABLE) {
+#ifdef USE_BT_PERSISTENCE
+    // Bluedroid reads its pairing data once, when it starts.
+    if (bt_host::global_bt_persistence != nullptr && !bt_host::global_bt_persistence->is_ready())
+      return;
+#endif
     ESP_LOGD(TAG, "Enabling");
     this->state_ = BLE_COMPONENT_STATE_OFF;
 
