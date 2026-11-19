@@ -147,7 +147,10 @@ async def to_code(config):
     # platform once any component calls require_fatfs() -- see
     # _reconcile_vfs_fatfs_sdkconfig(). Override via esp32 framework sdkconfig_options.
     max_devices = config[CONF_MAX_DEVICES]
-    require_fatfs(max_devices)
+    try:
+        require_fatfs(max_devices)
+    except TypeError:
+        require_fatfs()
     include_builtin_idf_component("fatfs")
     include_builtin_idf_component("esp_vfs_fat")
 
