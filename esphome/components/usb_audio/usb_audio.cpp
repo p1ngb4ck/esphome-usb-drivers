@@ -20,6 +20,14 @@
 namespace esphome {
 namespace usb_audio {
 
+#ifndef LOOP_TASK_CORE
+#if CONFIG_FREERTOS_UNICORE
+static constexpr BaseType_t LOOP_TASK_CORE = tskNO_AFFINITY;
+#else
+static constexpr BaseType_t LOOP_TASK_CORE = 1;
+#endif
+#endif
+
 static const char *const TAG = "usb_audio";
 
 // Timeout for each blocking control transfer during connection setup.
