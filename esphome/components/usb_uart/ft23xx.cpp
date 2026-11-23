@@ -386,29 +386,21 @@ bool USBUartTypeFT23XX::config_step(USBUartChannelBase *channel, uint8_t step, b
                              mode | (channel->cdc_dev_.bulk_interface_number + 1));
       return true;
     }
-    case 4:  // set modem control DTR (init only)
+    case 4:  // set modem control DTR+RTS (init only)
       if (reload)
         return false;
       this->modem_control_transfer(channel);
       return true;
-    case 5: {  // set modem control RTS (init only)
-      if (reload)
-        return false;
-      uint16_t rts_val = channel->rts_ ? (SIO_SET_RTS_MASK | SIO_RTS_HIGH) : SIO_SET_RTS_MASK;
-      ESP_LOGD(TAG, "SIO_SET_MODEM_CTRL: RTS=%s", ONOFF(channel->rts_));
-      this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, SIO_SET_MODEM_CTRL, rts_val,
-                             channel->cdc_dev_.bulk_interface_number + 1);
-      return true;
-    }
     default:
       return false;
   }
 }
 
 void USBUartTypeFT23XX::modem_control_transfer(USBUartChannelBase *channel) {
-  uint16_t dtr_val = channel->dtr_ ? (SIO_SET_DTR_MASK | SIO_DTR_HIGH) : SIO_SET_DTR_MASK;
-  ESP_LOGD(TAG, "SIO_SET_MODEM_CTRL: DTR=%s", ONOFF(channel->dtr_));
-  this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, SIO_SET_MODEM_CTRL, dtr_val,
+  const uint16_t value =
+      SIO_SET_DTR_MASK | SIO_SET_RTS_MASK | (channel->dtr_ ? SIO_DTR_HIGH : 0) | (channel->rts_ ? SIO_RTS_HIGH : 0);
+  ESP_LOGD(TAG, "SIO_SET_MODEM_CTRL: DTR=%s RTS=%s", ONOFF(channel->dtr_), ONOFF(channel->rts_));
+  this->config_transfer_(USB_VENDOR_DEV | usb_host::USB_DIR_OUT, SIO_SET_MODEM_CTRL, value,
                          channel->cdc_dev_.bulk_interface_number + 1);
 }
 
