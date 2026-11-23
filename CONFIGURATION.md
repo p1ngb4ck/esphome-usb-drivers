@@ -250,6 +250,8 @@ Per device: `vid`, `pid`, `channels` (required), and for CDC types `claim_comm_i
 | `id` | - | The UART ID other components use. |
 | `baud_rate` | required (CDC types: 9600) | 300 up to the chip's maximum; changeable at runtime. |
 | `data_bits` / `parity` / `stop_bits` | `8` / `NONE` / `1` | Line settings. |
+| `flow_control` | `NONE` | Flow control: `NONE`, `RTS_CTS`, `XON_XOFF`. |
+| `dtr` / `rts` | `false` / `false` | Initial state of DTR and RTS modem control lines. |
 | `buffer_size` | `256` | RX buffer, 64-8192 bytes; allocated on connect, freed after the device is gone. |
 | `flush_timeout` | `100ms` | How long `flush()` waits. |
 | `dummy_receiver` | `false` | Read and drop incoming data (keeps the adapter from stalling). |
