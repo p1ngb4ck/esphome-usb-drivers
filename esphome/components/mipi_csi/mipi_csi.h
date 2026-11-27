@@ -17,6 +17,7 @@
 #include "esphome/components/camera/encoder.h"
 #include "esphome/components/i2c/i2c_bus.h"
 #include "esphome/core/automation.h"
+#include "esphome/core/gpio.h"
 #include "esphome/core/helpers.h"
 
 #include "jpeg_encoder.h"
@@ -146,8 +147,8 @@ class MipiCsiCamera final : public camera::Camera {
   void set_i2c_bus(i2c::InternalI2CBus *bus) { this->i2c_bus_ = bus; }
   void set_sccb_frequency(uint32_t frequency) { this->sccb_frequency_ = frequency; }
   void set_init_ldo(bool init_ldo) { this->init_ldo_ = init_ldo; }
-  void set_reset_pin(int8_t pin) { this->reset_pin_ = pin; }
-  void set_power_pin(int8_t pin) { this->power_pin_ = pin; }
+  void set_reset_pin(GPIOPin *pin) { this->reset_pin_ = pin; }
+  void set_power_pin(GPIOPin *pin) { this->power_pin_ = pin; }
   void set_external_clock(int8_t pin, uint32_t frequency) {
     this->xclk_pin_ = pin;
     this->xclk_frequency_ = frequency;
@@ -217,6 +218,8 @@ class MipiCsiCamera final : public camera::Camera {
   enum class State : uint8_t { IDLE, RUNNING, STOPPING };
 
   bool start_external_clock_();
+  void power_up_();
+  void power_off_();
   bool init_video_();
   bool select_sensor_format_();
   bool configure_device_();
@@ -234,6 +237,7 @@ class MipiCsiCamera final : public camera::Camera {
   /// Ranks two sensor formats of the same resolution against each other.
   bool is_better_sensor_format_(const esp_cam_sensor_format_t &candidate, const esp_cam_sensor_format_t &current) const;
   /// Reduces the configured frame rate to one the driver can actually produce.
+  uint8_t reachable_framerate_(uint8_t sensor_fps) const;
   uint8_t resolve_framerate_(uint8_t sensor_fps) const;
   /// Applies a V4L2 user control, logging a warning if the sensor does not support it.
   void apply_control_(uint32_t id, int32_t value, const char *name);
@@ -265,8 +269,10 @@ class MipiCsiCamera final : public camera::Camera {
   i2c::InternalI2CBus *i2c_bus_{nullptr};
   uint32_t sccb_frequency_{100000};
   bool init_ldo_{true};
-  int8_t reset_pin_{-1};
-  int8_t power_pin_{-1};
+  GPIOPin *reset_pin_{nullptr};
+  GPIOPin *power_pin_{nullptr};
+  bool sensor_ready_{false};
+  bool powering_{false};
   int8_t xclk_pin_{-1};
   uint32_t xclk_frequency_{0};
 

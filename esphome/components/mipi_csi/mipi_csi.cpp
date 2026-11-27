@@ -42,19 +42,24 @@ struct FormatMapping {
   jpeg_down_sampling_type_t sub_sample;
   uint8_t bytes_per_pixel;
   const char *name;
+  esp_cam_sensor_output_format_t sensor_format;
 };
 
 static FormatMapping get_format_mapping(PixelFormat format) {
   switch (format) {
     case PixelFormat::PIXEL_FORMAT_RGB888:
-      return {V4L2_PIX_FMT_RGB24, JPEG_ENCODE_IN_FORMAT_RGB888, JPEG_DOWN_SAMPLING_YUV444, 3, "RGB888"};
+      return {V4L2_PIX_FMT_RGB24, JPEG_ENCODE_IN_FORMAT_RGB888, JPEG_DOWN_SAMPLING_YUV444, 3, "RGB888",
+              ESP_CAM_SENSOR_PIXFORMAT_RGB888};
     case PixelFormat::PIXEL_FORMAT_YUV422:
-      return {V4L2_PIX_FMT_UYVY, JPEG_ENCODE_IN_FORMAT_YUV422, JPEG_DOWN_SAMPLING_YUV422, 2, "YUV422"};
+      return {V4L2_PIX_FMT_UYVY, JPEG_ENCODE_IN_FORMAT_YUV422, JPEG_DOWN_SAMPLING_YUV422, 2, "YUV422",
+              ESP_CAM_SENSOR_PIXFORMAT_YUV422};
     case PixelFormat::PIXEL_FORMAT_GRAYSCALE:
-      return {V4L2_PIX_FMT_GREY, JPEG_ENCODE_IN_FORMAT_GRAY, JPEG_DOWN_SAMPLING_GRAY, 1, "GRAYSCALE"};
+      return {V4L2_PIX_FMT_GREY, JPEG_ENCODE_IN_FORMAT_GRAY, JPEG_DOWN_SAMPLING_GRAY, 1, "GRAYSCALE",
+              ESP_CAM_SENSOR_PIXFORMAT_GRAYSCALE};
     case PixelFormat::PIXEL_FORMAT_RGB565:
     default:
-      return {V4L2_PIX_FMT_RGB565, JPEG_ENCODE_IN_FORMAT_RGB565, JPEG_DOWN_SAMPLING_YUV422, 2, "RGB565"};
+      return {V4L2_PIX_FMT_RGB565, JPEG_ENCODE_IN_FORMAT_RGB565, JPEG_DOWN_SAMPLING_YUV422, 2, "RGB565",
+              ESP_CAM_SENSOR_PIXFORMAT_RGB565};
   }
 }
 
@@ -82,6 +87,8 @@ void MipiCsiCamera::setup() {
     this->alloc_ = psram_alloc;
     this->free_ = psram_free;
   }
+  setup_output_pin(this->power_pin_, false);
+  setup_output_pin(this->reset_pin_, true);
   if (!this->start_external_clock_()) {
     this->mark_failed();
     return;
@@ -117,6 +124,38 @@ bool MipiCsiCamera::start_external_clock_() {
 #endif
 }
 
+void MipiCsiCamera::power_up_() {
+  if (this->sensor_ready_ || this->powering_)
+    return;
+  if (this->power_pin_ != nullptr)
+    this->power_pin_->digital_write(true);
+  if (this->reset_pin_ == nullptr) {
+    this->sensor_ready_ = true;
+    return;
+  }
+  this->powering_ = true;
+  this->reset_pin_->digital_write(false);
+  this->set_timeout("reset", 10, [this]() {
+    this->reset_pin_->digital_write(true);
+    this->set_timeout("reset", 20, [this]() {
+      this->powering_ = false;
+      this->sensor_ready_ = true;
+      this->enable_loop();
+    });
+  });
+}
+
+void MipiCsiCamera::power_off_() {
+  if (!this->sensor_ready_ && !this->powering_)
+    return;
+  if (this->powering_)
+    this->cancel_timeout("reset");
+  if (this->power_pin_ != nullptr)
+    this->power_pin_->digital_write(false);
+  this->powering_ = false;
+  this->sensor_ready_ = false;
+}
+
 bool MipiCsiCamera::init_video_() {
   // The ISP's algorithms (esp_ipa, a prebuilt library) log every frame at debug level: warnings and errors only
   static const char *const IPA_TAGS[] = {"esp_ipa_acc", "esp_ipa_adn", "esp_ipa_aen", "esp_ipa_af", "esp_ipa_agc",
@@ -134,8 +173,8 @@ bool MipiCsiCamera::init_video_() {
   csi_config.sccb_config.init_sccb = false;
   csi_config.sccb_config.i2c_handle = i2c_handle;
   csi_config.sccb_config.freq = this->sccb_frequency_;
-  csi_config.reset_pin = static_cast<gpio_num_t>(this->reset_pin_);
-  csi_config.pwdn_pin = static_cast<gpio_num_t>(this->power_pin_);
+  csi_config.reset_pin = GPIO_NUM_NC;
+  csi_config.pwdn_pin = GPIO_NUM_NC;
   // When another peripheral already powers the D-PHY rail, claiming it a second time fails and
   // takes the whole camera down with it, so in that case it is left alone.
   csi_config.dont_init_ldo = !this->init_ldo_;
@@ -221,33 +260,31 @@ bool MipiCsiCamera::is_better_sensor_format_(const esp_cam_sensor_format_t &cand
   // tuning algorithms, so they are always preferred.
   if ((candidate.isp_info != nullptr) != (current.isp_info != nullptr))
     return candidate.isp_info != nullptr;
+  // Without the ISP, only a sensor output in the configured pixel format works on every chip revision
+  const esp_cam_sensor_output_format_t sensor_format = get_format_mapping(this->pixel_format_).sensor_format;
+  if ((candidate.format == sensor_format) != (current.format == sensor_format))
+    return candidate.format == sensor_format;
 
-  // Prefer a sensor rate the configured rate divides into, because that is the only way the driver
-  // can reach the configured rate exactly.
-  const bool candidate_fits = candidate.fps != 0 && candidate.fps % this->framerate_ == 0;
-  const bool current_fits = current.fps != 0 && current.fps % this->framerate_ == 0;
-  if (candidate_fits != current_fits)
-    return candidate_fits;
+  // Prefer the rate closest to the configured one that the driver can reach by dropping frames
+  return this->reachable_framerate_(candidate.fps) > this->reachable_framerate_(current.fps);
+}
 
-  return false;
+uint8_t MipiCsiCamera::reachable_framerate_(uint8_t sensor_fps) const {
+  if (sensor_fps == 0)
+    return this->framerate_;
+  // The driver can only divide the sensor's rate
+  uint8_t fps = std::min(this->framerate_, sensor_fps);
+  while (sensor_fps % fps != 0)
+    fps--;
+  return fps;
 }
 
 uint8_t MipiCsiCamera::resolve_framerate_(uint8_t sensor_fps) const {
-  if (sensor_fps == 0)
-    return this->framerate_;
-
-  // The driver slows the stream down by dropping whole frames, so it can only divide the sensor's
-  // rate. Step down to the closest rate that divides it evenly.
-  for (uint8_t fps = std::min<uint8_t>(this->framerate_, sensor_fps); fps >= 1; fps--) {
-    if (sensor_fps % fps == 0) {
-      if (fps != this->framerate_) {
-        ESP_LOGW(TAG, "The sensor runs at %u fps, so %u fps is used instead of %u fps", sensor_fps, fps,
-                 this->framerate_);
-      }
-      return fps;
-    }
+  const uint8_t fps = this->reachable_framerate_(sensor_fps);
+  if (fps != this->framerate_) {
+    ESP_LOGW(TAG, "The sensor runs at %u fps, so %u fps is used instead of %u fps", sensor_fps, fps, this->framerate_);
   }
-  return sensor_fps;
+  return fps;
 }
 
 bool MipiCsiCamera::configure_device_() {
@@ -555,6 +592,7 @@ void MipiCsiCamera::finish_stop_() {
   this->stop_wanted_.store(false);
   this->parked_.store(false);
   this->failed_.store(false);
+  this->power_off_();
   this->state_ = State::IDLE;
 }
 
@@ -663,6 +701,12 @@ void MipiCsiCamera::loop() {
   // Event driven: woken by a request, a finished frame, an image given back or the task parking
   if (this->state_ == State::IDLE) {
     if (!this->has_requested_image_()) {
+      this->power_off_();
+      this->disable_loop();
+      return;
+    }
+    this->power_up_();
+    if (!this->sensor_ready_) {
       this->disable_loop();
       return;
     }
@@ -768,8 +812,7 @@ void MipiCsiCamera::loop() {
     this->enable_loop();  // the stop (or the preview) follows on the next pass
     return;
   }
-  this->pending_requesters_ = this->single_requesters_ | this->stream_requesters_;
-  this->single_requesters_ = 0;
+  this->pending_requesters_ = this->single_requesters_.exchange(0) | this->stream_requesters_.load();
   this->frame_wanted_.store(true);
   this->disable_loop();
 }
@@ -872,17 +915,21 @@ void MipiCsiCamera::request_image(camera::CameraRequester requester) {
 }
 
 void MipiCsiCamera::start_stream(camera::CameraRequester requester) {
-  for (auto *listener : this->listeners_) {
-    listener->on_stream_start();
-  }
+  this->defer([this]() {
+    for (auto *listener : this->listeners_) {
+      listener->on_stream_start();
+    }
+  });
   this->stream_requesters_ |= (1U << requester);
   this->enable_loop_soon_any_context();
 }
 
 void MipiCsiCamera::stop_stream(camera::CameraRequester requester) {
-  for (auto *listener : this->listeners_) {
-    listener->on_stream_stop();
-  }
+  this->defer([this]() {
+    for (auto *listener : this->listeners_) {
+      listener->on_stream_stop();
+    }
+  });
   this->stream_requesters_ &= ~(1U << requester);
   this->enable_loop_soon_any_context();
 }

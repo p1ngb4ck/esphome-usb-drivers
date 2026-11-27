@@ -332,12 +332,9 @@ def _final_validate(config: ConfigType) -> None:
         if variant in LP_I2C_VARIANT:
             max_lp_num = ESP32_I2C_CAPABILITIES[variant]["LP"]
             max_hp_num = ESP32_I2C_CAPABILITIES[variant]["HP"]
-            lp_num = sum(
-                CONF_LOW_POWER_MODE in conf and conf[CONF_LOW_POWER_MODE]
-                for conf in full_config
-            )
+            lp_num = sum(bool(conf.get(CONF_LOW_POWER_MODE)) for conf in full_config)
             hp_num = len(full_config) - lp_num
-            if CONF_LOW_POWER_MODE in config and config[CONF_LOW_POWER_MODE]:
+            if config.get(CONF_LOW_POWER_MODE):
                 VALIDATE_LP_I2C[variant](config)
             if lp_num > max_lp_num:
                 raise cv.Invalid(
@@ -423,10 +420,9 @@ async def to_code(config: ConfigType) -> None:
 
         cg.add(var.set_frequency(int(config[CONF_FREQUENCY])))
         cg.add(var.set_scan(config[CONF_SCAN]))
-        if CONF_TIMEOUT in config:
-            cg.add(var.set_timeout(int(config[CONF_TIMEOUT].total_microseconds)))
-        if CONF_LOW_POWER_MODE in config:
-            cg.add(var.set_lp_mode(bool(config[CONF_LOW_POWER_MODE])))
+        if (timeout := config.get(CONF_TIMEOUT)) is not None:
+            cg.add(var.set_timeout(int(timeout.total_microseconds)))
+        cg.add_optional(var.set_lp_mode, config.get(CONF_LOW_POWER_MODE))
     elif CORE.is_libretiny:
         var = cg.new_Pvariable(config[CONF_ID])
         await cg.register_component(var, config)
@@ -435,8 +431,8 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_scl_pin(await cg.gpio_pin_expression(config[CONF_SCL])))
         cg.add(var.set_frequency(int(config[CONF_FREQUENCY])))
         cg.add(var.set_scan(config[CONF_SCAN]))
-        if CONF_TIMEOUT in config:
-            cg.add(var.set_timeout(int(config[CONF_TIMEOUT].total_microseconds)))
+        if (timeout := config.get(CONF_TIMEOUT)) is not None:
+            cg.add(var.set_timeout(int(timeout.total_microseconds)))
     else:
         var = cg.new_Pvariable(config[CONF_ID])
         await cg.register_component(var, config)
@@ -450,12 +446,11 @@ async def to_code(config: ConfigType) -> None:
         cg.add(var.set_scan(config[CONF_SCAN]))
         if CONF_TIMEOUT in config:
             cg.add(var.set_timeout(int(config[CONF_TIMEOUT].total_microseconds)))
-        if (bus_recovery := config.get(CONF_BUS_RECOVERY)) is not None:
-            cg.add(var.set_bus_recovery(bus_recovery))
+        if CONF_BUS_RECOVERY in config:
+            cg.add(var.set_bus_recovery(config[CONF_BUS_RECOVERY]))
         if CORE.using_arduino and not CORE.is_esp32:
             cg.add_library("Wire", None)
-        if CONF_LOW_POWER_MODE in config:
-            cg.add(var.set_lp_mode(bool(config[CONF_LOW_POWER_MODE])))
+        cg.add_optional(var.set_lp_mode, config.get(CONF_LOW_POWER_MODE))
 
 
 def i2c_device_schema(default_address: int | None) -> cv.Schema:
