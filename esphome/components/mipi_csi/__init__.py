@@ -1,20 +1,29 @@
+import difflib
 import logging
 from pathlib import Path
 import re
 
 from esphome import automation, pins
 import esphome.codegen as cg
-from esphome.components import esp32, i2c
+from esphome.components import esp32, i2c, network
 from esphome.components.camera import (
     CONF_ENCODER,
     ENCODER_H264,
     ENCODER_SCHEMA,
     encoder_to_code,
 )
-from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
+from esphome.components.esp32 import (
+    CONF_EXECUTE_FROM_PSRAM,
+    add_idf_component,
+    add_idf_sdkconfig_option,
+)
 from esphome.components.esp32.const import VARIANT_ESP32P4
+from esphome.components.esp_ldo import DOMAIN as ESP_LDO_DOMAIN
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_ADVANCED,
+    CONF_CHANNEL,
+    CONF_FRAMEWORK,
     CONF_FREQUENCY,
     CONF_I2C_ID,
     CONF_ID,
@@ -24,10 +33,12 @@ from esphome.const import (
     CONF_SENSOR,
     CONF_TRIGGER_ID,
     CONF_TYPE,
+    KEY_ESP32,
     Framework,
 )
 from esphome.core import CORE
 from esphome.core.entity_helpers import setup_entity
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 from .const import (
@@ -86,7 +97,7 @@ PIXEL_FORMATS = {
     "GRAYSCALE": PixelFormat.PIXEL_FORMAT_GRAYSCALE,
 }
 
-_RESOLUTION_PATTERN = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
+_FORMAT_RESOLUTION = re.compile(r"_(\d+)X(\d+)_")
 
 
 def validate_sensor(value: str) -> str:
@@ -95,31 +106,55 @@ def validate_sensor(value: str) -> str:
     if not value:
         raise cv.Invalid("Sensor name must not be empty")
     if value not in SENSOR_FORMATS:
+        # Warn only: real sensors such as SC2356 are one digit from a built-in name
+        close = difflib.get_close_matches(value, SENSOR_FORMATS, n=1, cutoff=0.8)
         _LOGGER.warning(
-            "Sensor '%s' is not built into esp_cam_sensor. Its driver must come from another "
-            "IDF component (for example under esp32: framework: components:). Built-in "
-            "sensors are: %s",
+            "Sensor '%s' is not built into esp_cam_sensor%s. Its driver must come from another "
+            "IDF component (for example under esp32: framework: components:).",
             value,
-            ", ".join(SENSOR_FORMATS),
+            f" (did you mean '{close[0]}'?)" if close else "",
         )
     return value
 
 
-def validate_resolution(value: str) -> tuple[int, int]:
-    """Parses a `WIDTHxHEIGHT` resolution into a pair of pixel counts."""
-    value = cv.string(value)
-    match = _RESOLUTION_PATTERN.match(value)
-    if match is None:
-        raise cv.Invalid(f"Resolution must be written as WIDTHxHEIGHT, got '{value}'")
-    width, height = int(match.group(1)), int(match.group(2))
-    # A zero is what tells the component to keep the sensor's own resolution, and anything above
-    # 65535 does not fit the size the component stores, so neither may reach it from here.
-    for dimension, name in ((width, "Width"), (height, "Height")):
-        if not 1 <= dimension <= 65535:
-            raise cv.Invalid(
-                f"{name} must be between 1 and 65535, got {dimension} in '{value}'"
-            )
+def validate_resolution(value) -> tuple[int, int]:
+    width, height = cv.dimensions(value)
+    if width > 65535 or height > 65535:
+        raise cv.Invalid(f"Width and height must be at most 65535, got {width}x{height}")
     return width, height
+
+
+def _validate_resolution(config: ConfigType) -> ConfigType:
+    if (resolution := config.get(CONF_RESOLUTION)) is None:
+        return config
+    sensor = config[CONF_SENSOR]
+    supported = sorted(
+        {
+            (int(match[1]), int(match[2]))
+            for name in SENSOR_FORMATS.get(sensor, [])
+            if (match := _FORMAT_RESOLUTION.search(name)) is not None
+        }
+    )
+    if supported and tuple(resolution) not in supported:
+        raise cv.Invalid(
+            f"{sensor} cannot capture {resolution[0]}x{resolution[1]}. Supported "
+            f"resolutions are: {', '.join(f'{w}x{h}' for w, h in supported)}",
+            path=[CONF_RESOLUTION],
+        )
+    return config
+
+
+def _whole_framerate(value: float) -> float:
+    """The capture rate is a whole number of frames per second."""
+    if value != int(value):
+        raise cv.Invalid("framerate must be a whole number of fps")
+    return value
+
+
+def _request_high_performance_networking(config: ConfigType) -> ConfigType:
+    """Streams send whole frames; the default lwIP buffers cap them at about a third of the frame rate."""
+    network.require_high_performance_networking()
+    return config
 
 
 def _validate_h264_format(config: ConfigType) -> ConfigType:
@@ -129,6 +164,22 @@ def _validate_h264_format(config: ConfigType) -> ConfigType:
     ):
         raise cv.Invalid(
             f"{CONF_ENCODER} h264 needs {CONF_PIXEL_FORMAT} RGB565 or YUV422, not {config[CONF_PIXEL_FORMAT]}"
+        )
+    return config
+
+
+CSI_LDO_CHANNEL = 3
+
+
+def _final_validate(config: ConfigType) -> ConfigType:
+    if config[CONF_INIT_LDO] and any(
+        ldo[CONF_CHANNEL] == CSI_LDO_CHANNEL
+        for ldo in fv.full_config.get().get(ESP_LDO_DOMAIN, [])
+    ):
+        raise cv.Invalid(
+            f"LDO channel {CSI_LDO_CHANNEL} is configured both here ({CONF_INIT_LDO}) and in {ESP_LDO_DOMAIN}; "
+            f"keep one of them",
+            path=[CONF_INIT_LDO],
         )
     return config
 
@@ -145,7 +196,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=100),
             cv.Optional(CONF_ENCODER, default={}): ENCODER_SCHEMA,
             cv.Optional(CONF_FRAMERATE, default="10 fps"): cv.All(
-                cv.framerate, cv.Range(min=1, max=60)
+                cv.framerate, cv.Range(min=1, max=60), _whole_framerate
             ),
             # One of them is the driver's reserve (its own backup buffer is off): all from the buffer allocator
             cv.Optional(CONF_FRAME_BUFFER_COUNT, default=4): cv.int_range(min=2, max=4),
@@ -156,8 +207,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_SCCB_FREQUENCY): cv.All(
                 cv.frequency, cv.Range(min=10000, max=1000000)
             ),
-            cv.Optional(CONF_RESET_PIN): pins.internal_gpio_output_pin_number,
-            cv.Optional(CONF_POWER_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_RESET_PIN): pins.gpio_output_pin_schema,
+            cv.Optional(CONF_POWER_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_EXTERNAL_CLOCK): cv.Schema(
                 {
                     cv.Required(CONF_PIN): pins.internal_gpio_output_pin_number,
@@ -192,10 +243,14 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    _validate_resolution,
+    _request_high_performance_networking,
     cv.only_with_framework(Framework.ESP_IDF),
     esp32.only_on_variant(supported=[VARIANT_ESP32P4]),
     _validate_h264_format,
 )
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 SETTERS = {
     CONF_PIXEL_FORMAT: "set_pixel_format",
@@ -203,8 +258,6 @@ SETTERS = {
     CONF_HORIZONTAL_FLIP: "set_horizontal_flip",
     CONF_VERTICAL_FLIP: "set_vertical_flip",
     CONF_FRAME_BUFFER_COUNT: "set_frame_buffer_count",
-    CONF_RESET_PIN: "set_reset_pin",
-    CONF_POWER_PIN: "set_power_pin",
 }
 
 
@@ -222,6 +275,8 @@ async def to_code(config: ConfigType) -> None:
 
     if (resolution := config.get(CONF_RESOLUTION)) is not None:
         cg.add(var.set_resolution(*resolution))
+    await cg.add_pin(var.set_reset_pin, config.get(CONF_RESET_PIN))
+    await cg.add_pin(var.set_power_pin, config.get(CONF_POWER_PIN))
     cg.add(var.set_sensor_name(config[CONF_SENSOR]))
     cg.add(var.set_init_ldo(config.get(CONF_INIT_LDO)))
     cg.add(var.set_framerate(int(config[CONF_FRAMERATE])))
@@ -307,45 +362,7 @@ def _sync_esp_video_override() -> str:
     return str(dest)
 
 
-ESP_IPA_COMMIT = "5ec4d12101d7308dd9f826ff211312387f63e22d"
-ESP_IPA_URL = f"https://codeload.github.com/espressif/esp-video-components/zip/{ESP_IPA_COMMIT}"
-
-
-def _sync_esp_ipa_override() -> str:
-    """esp_ipa of esp-video-components ESP_IPA_COMMIT (with its ESP32-P4 rev < 3 library) in components-src."""
-    import io
-    import shutil
-    import zipfile
-
-    from esphome.external_files import compute_local_file_path, download_content
-
-    dest = Path(CORE.build_path) / "components-src" / "espressif__esp_ipa"
-    marker = dest / _ESP_VIDEO_OVERRIDE_MARKER
-    if marker.is_file() and marker.read_text() == ESP_IPA_COMMIT:
-        return str(dest)
-
-    archive = download_content(ESP_IPA_URL, compute_local_file_path("mipi_csi", ESP_IPA_URL))
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-    prefix = f"esp-video-components-{ESP_IPA_COMMIT}/esp_ipa/"
-    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        for info in zf.infolist():
-            if not info.filename.startswith(prefix) or info.is_dir():
-                continue
-            if info.filename[len(prefix) :].startswith("test_apps/"):
-                continue  # their own manifests, not the component
-            target = dest / info.filename[len(prefix) :]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(info))
-    if not (dest / "lib" / "esp32p4" / "v6.0+" / "libesp_ipa_p4_less_v3.a").is_file():
-        raise cv.Invalid(f"mipi_csi: esp_ipa {ESP_IPA_COMMIT} has no libesp_ipa_p4_less_v3.a")
-
-    marker.write_text(ESP_IPA_COMMIT)
-    return str(dest)
-
-
-ESP_CAM_SENSOR_VERSION = "2.6.0"
+ESP_CAM_SENSOR_VERSION = "2.7.0"
 ESP_CAM_SENSOR_URL = (
     "https://components-file.espressif.com/components/espressif/esp_cam_sensor/"
     f"{ESP_CAM_SENSOR_VERSION}/espressif__esp_cam_sensor-v{ESP_CAM_SENSOR_VERSION}.zip"
@@ -451,15 +468,7 @@ def _add_idf_config(config: ConfigType) -> None:
         )
     else:
         add_idf_component(name="espressif/esp_cam_sensor", ref=ESP_CAM_SENSOR_VERSION)
-    # esp_ipa 2.4.0's IDF 6 library is built for ESP32-P4 rev >= 3 (Zba / Zbb instructions): on a rev < 3 chip
-    # the ISP pipeline's create_ipa_array() trapped (illegal instruction, sh2add). The commit that adds
-    # libesp_ipa_p4_less_v3*.a (picked with CONFIG_ESP32P4_SELECTS_REV_LESS_V3), still version 2.4.0. As an
-    # override: a git source beside esp_video's registry requirement was resolved from the registry anyway
-    add_idf_component(
-        name="espressif/esp_ipa",
-        ref="2.4.0",
-        override_path=_sync_esp_ipa_override(),
-    )
+    add_idf_component(name="espressif/esp_ipa", ref="2.5.0")
 
     sensor = config[CONF_SENSOR]
     if (formats := SENSOR_FORMATS.get(sensor)) is not None:
@@ -486,3 +495,8 @@ def _add_idf_config(config: ConfigType) -> None:
         "CONFIG_VFS_SUPPORT_IO": True,
     }.items():
         add_idf_sdkconfig_option(option, value)
+    if not CORE.config[KEY_ESP32][CONF_FRAMEWORK][CONF_ADVANCED][
+        CONF_EXECUTE_FROM_PSRAM
+    ]:
+        # With mipi_dsi (ISR cache safe GDMA) the CSI controller must be in internal RAM
+        add_idf_sdkconfig_option("CONFIG_CAM_CTLR_MIPI_CSI_ISR_CACHE_SAFE", True)
